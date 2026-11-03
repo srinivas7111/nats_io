@@ -1,0 +1,3329 @@
+openapi: 3.0.3
+info:
+  title: Enterprise Messaging Platform - Comprehensive Client API
+  version: 1.9.2
+  description: '## Introduction
+
+
+    Application-facing HTTP contract for the Enterprise Messaging SDK over NATS Core and JetStream.
+
+
+    ## Contract principles
+
+
+    - **Logical routing:** Applications use `destination`; native NATS subjects, stream names and cluster topology
+    are internal.
+
+    - **Client/Admin boundary:** Applications can discover authorized destinations and Admin-provisioned consumers.
+    Provisioning destinations, streams, consumers, mappings and policies remains an Admin responsibility.
+
+    - **CORE:** Transient, best-effort push delivery. No persistence, pull, durable replay or JetStream settlement.
+
+    - **JETSTREAM:** Persistent messaging with managed pull/push delivery, settlement, replay and policy-controlled
+    dead-letter handling.
+
+    - **Delivery semantics:** At-least-once where redelivery applies. Consumers must be idempotent; exactly-once
+    delivery is not promised.
+
+    - **Payloads:** `payload` contains base64-encoded bytes; `contentType` identifies the original payload format.
+
+    - **Batch publishing:** Synchronous batch returns per-message outcomes in the HTTP response. Asynchronous batch
+    returns an operation ID for progress and paginated results.
+
+    - **Batch input choices:** Batch endpoints accept a JSON `messages` array, an NDJSON request body, or multipart
+    form data. In multipart form data, `file` is an optional field; provide either `file` or `messages`, not both.
+    `preserveOrder` is optional.
+
+    - **Large content:** Use asynchronous batch for large or long-running workloads. The SDK should stream file
+    content rather than buffer the entire file. Internal storage or staging is not exposed by this contract.
+
+    - **Operation tracking:** Use the Operations endpoints to inspect status, retrieve per-record outcomes and retry
+    eligible failures.
+
+    - **SDK responsibilities:** Attach authentication, correlation and tracing headers; preserve `clientRequestId`
+    values across safe retries; and stream large request bodies.
+
+
+
+    ## Batch request formats
+
+
+    - `application/json`: submit a JSON object containing `messages` and optional `preserveOrder`.
+
+    - `application/x-ndjson`: submit one `PublishRequest` JSON object per line.
+
+    - `multipart/form-data`: submit either an optional `file` field (JSON or JSONL file) or a `messages` field;
+    exactly one is required. The `file` field is optional because callers may use `messages` instead. Do not submit
+    both fields.
+
+    - The `file` field is a multipart form field in the request body, not a query parameter or a separate upload-session
+    API.
+
+    - Synchronous batch supports at most 1,000 records. Asynchronous batch is intended for larger workloads and
+    is subject to configured platform limits.
+
+
+    ## Multipart file field
+
+
+    The `file` field is an optional multipart form field, not a query/path parameter. When using multipart/form-data,
+    submit either `file` or `messages`; exactly one must be present. When using application/json or application/x-ndjson,
+    do not send the multipart `file` field.'
+  contact:
+    name: Enterprise Messaging Platform Team
+servers:
+- url: https://messaging.example.com
+  description: Environment-specific API host
+security:
+- BearerAuth: []
+tags:
+- name: Destinations
+  description: Discover logical destinations authorized for the authenticated application.
+- name: Consumers
+  description: Read-only discovery of application-visible consumers provisioned by Platform/Admin.
+- name: Publishing
+  description: Single, synchronous batch, asynchronous batch and file-based bulk publishing.
+- name: Request Reply
+  description: Synchronous request/reply messaging.
+- name: Consumption
+  description: Pull messages or receive messages over Server-Sent Events using a runtime subscription handle.
+- name: Delivery
+  description: Settle JetStream deliveries with ACK, NAK, IN_PROGRESS or TERM; not applicable to CORE.
+- name: Replay and Reprocessing
+  description: Isolated replay sessions and controlled reprocessing of stored messages.
+- name: Monitoring
+  description: Consumer metrics, dead-letter inspection and asynchronous operation status.
+- name: Health
+  description: API liveness and readiness.
+- name: Subscriptions
+  description: Create, inspect, pause, resume and close application runtime handles for Admin-provisioned consumers.
+x-sdk-runtime-guidance:
+  authentication:
+    scheme: Bearer JWT obtained through OAuth2/OIDC.
+    tokenLifecycle: The Java SDK must accept a pluggable token provider that obtains, caches and refreshes access
+      tokens. Attach the current token to every request and refresh/retry once only for an eligible authentication-expiry
+      response.
+    refreshOwnership: Token and client-secret lifecycle belongs to the identity provider integration. This API does
+      not expose a token-refresh endpoint. Never embed client secrets or refresh tokens in application source code.
+    applicationIdentity: The authenticated principal determines application ownership. If X-Application-Id is supplied,
+      it must match the authenticated principal; it is not an authorization override.
+  destinationModel: Destination is the only application-facing routing abstraction. The platform resolves destination
+    to one or more NATS subjects and, for JETSTREAM, to an approved stream. Clients must not send subject or streamName.
+  consumerModel: consumerId identifies a logical application consumer. consumerName is unique within an application
+    and destination. Creating another consumerName creates an independent logical delivery position where supported.
+    Repeating the same create request is idempotent and returns the existing consumer when its immutable attributes
+    match; conflicting attributes return 409. The platform assigns and manages native consumer and durable names.
+  modeRules:
+    CORE: Best-effort transient messaging. No persistence, replay, durable cursor or JetStream acknowledgement.
+      CORE consumers use PUSH delivery.
+    JETSTREAM: Persistent messaging. Supports managed PULL or PUSH delivery, acknowledgements, replay and dead-letter
+      handling subject to destination policy.
+  serverSentEvents:
+    reconnectHeader: Last-Event-ID
+    behavior: Reconnect with the last completely processed event ID. Persist the cursor only after application processing
+      succeeds. Use bounded exponential backoff with jitter and idempotent processing.
+    cursorRecovery: If the cursor has expired or is unavailable, surface a recoverable cursor error and require
+      an application-approved replay or reconciliation flow; never silently restart at the newest event.
+  batchPublishing:
+    syncMaximumItemsPerRequest: 1000
+    correlation: Every input record must include a stable clientRequestId. Every result returns that ID and recordNumber;
+      messageId is also returned when assigned.
+    fileLimits: Maximum request size, file size, decoded payload size, record count and concurrency are enforced
+      by platform policy. The API returns a validation error when a limit is exceeded.
+    clientBehavior: For large files, stream the request body or multipart file rather than loading the entire file
+      into memory. JSONL is recommended for record-by-record processing. Preserve stable per-record identifiers
+      across retries.
+    retries: Retry only retryable failed records with stable identifiers and an idempotency key. Never blindly resubmit
+      the entire original file after an indeterminate result.
+    asyncSubmission: POST /api/v1/messages/batch-async accepts JSON, NDJSON, or multipart JSON/JSONL file; returns
+      an operationId for status and paginated results.
+    syncSubmission: POST /api/v1/messages/batch accepts JSON, NDJSON, or multipart JSON/JSONL file; returns per-record
+      outcomes synchronously.
+    largeFileHandling: The SDK streams file content. Internal staging or object storage is not exposed as a client
+      API.
+  deliverySemantics: At-least-once delivery may produce duplicates. Consumers must be idempotent. CORE mode does
+    not support ACK/NAK.
+  replay:
+    session: Replay creates an isolated replay session with its own cursor and delivery handles.
+    liveConsumer: Replay must never rewind, pause or mutate the live durable consumer position.
+    lifecycle: Create replay session, pull and settle replay deliveries, inspect session status, then close or allow
+      expiry.
+    limits: Replay is bounded by retention, destination policy, time range and platform quotas.
+paths:
+  /api/v1/destinations:
+    get:
+      tags:
+      - Destinations
+      operationId: listDestinations
+      summary: List available destinations
+      description: Returns logical destinations the authenticated application is authorized to use. Does not expose
+        native subjects or stream names.
+      parameters:
+      - name: messagingMode
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - CORE
+          - JETSTREAM
+        description: Filter results by messaging mode.
+      - name: access
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - PUBLISH
+          - SUBSCRIBE
+        description: Filter destinations by the authenticated application's access level, where supported.
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+        description: Maximum number of items to return in this page.
+      - name: pageToken
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque token returned by the previous page; omit it for the first page.
+      responses:
+        '200':
+          description: Page of authorized destinations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DestinationList'
+              example:
+                items:
+                - &id001
+                  destination: payment.events
+                  supportedModes:
+                  - JETSTREAM
+                  access:
+                  - PUBLISH
+                  - SUBSCRIBE
+                  status: ACTIVE
+                  description: Payment lifecycle events
+                  capabilities:
+                  - PUBLISH
+                  - BATCH_PUBLISH
+                  - PULL
+                  - PUSH
+                  - ACKNOWLEDGEMENT
+                  - REPLAY
+                nextPageToken: next-page-token
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/destinations/{destination}:
+    get:
+      tags:
+      - Destinations
+      operationId: getDestination
+      summary: Get destination details
+      description: Returns the logical destination definition and supported capabilities. Native subject mappings
+        and stream names are intentionally omitted.
+      parameters:
+      - name: destination
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Logical destination identifier. Native subject and stream names are not accepted.
+      responses:
+        '200':
+          description: Destination details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Destination'
+              example: *id001
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/messages:
+    post:
+      tags:
+      - Publishing
+      operationId: publishMessage
+      summary: Publish a message
+      description: Publishes bytes to a logical destination. CORE is best-effort; JETSTREAM returns a persistence
+        acknowledgement. The platform resolves all native routing and persistence resources.
+      parameters:
+      - &id002
+        name: X-Application-Id
+        in: header
+        required: false
+        schema:
+          type: string
+        description: Optional consistency header; must match the authenticated application principal.
+      - &id003
+        name: X-Correlation-ID
+        in: header
+        required: false
+        schema:
+          type: string
+          maxLength: 128
+        description: Optional application-generated correlation identifier propagated through the request for log
+          and trace correlation.
+      - &id004
+        name: traceparent
+        in: header
+        required: false
+        schema:
+          type: string
+          maxLength: 256
+        description: Optional W3C Trace Context traceparent header used to propagate distributed tracing context.
+      - &id005
+        name: Idempotency-Key
+        in: header
+        required: false
+        schema:
+          type: string
+          maxLength: 128
+        description: Stable client-generated key for deduplication within the configured window.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+            example:
+              destination: payment.events
+              messagingMode: JETSTREAM
+              payload: eyJldmVudElkIjoiZXZ0LTdmM2E5YzIxIiwiZXZlbnRUeXBlIjoiUEFZTUVOVF9DUkVBVEVEIiwicGF5bWVudElkIjoiUEFZLTIwMjYtMDAwMTg0In0=
+              contentType: application/json
+              headers:
+                x-correlation-id: corr-20261103-000184
+                x-source-system: payments-api
+              messageId: payment-Pay-2026-000184-created
+              clientRequestId: req-payment-20261103-000184
+        description: Message to publish to the specified logical destination.
+      responses:
+        '202':
+          description: Message accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishResponse'
+              example:
+                clientRequestId: req-payment-20261103-000184
+                messageId: payment-Pay-2026-000184-created
+                destination: payment.events
+                messagingMode: JETSTREAM
+                status: ACCEPTED
+                accepted: true
+                persistenceAcknowledged: true
+                publishedAt: '2026-11-03T08:45:15Z'
+                correlationId: corr-20261103-000184
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/messages/batch:
+    post:
+      tags:
+      - Publishing
+      operationId: publishMessageBatch
+      summary: Publish a synchronous batch
+      description: 'Publishes 1 to 1,000 messages and returns per-message outcomes in the same HTTP response. Choose
+        one request representation: an application/json body with a messages array, an application/x-ndjson body
+        with one PublishRequest JSON object per line, or multipart/form-data. For multipart/form-data, the optional
+        file field accepts a JSON or JSONL file; alternatively, provide the messages field. Do not provide both
+        file and messages. The preserveOrder field is optional. The synchronous endpoint supports at most 1,000
+        records and is subject to request-size and processing-time limits. Use the asynchronous endpoint for larger
+        or long-running batches. Each record is processed independently; the batch is not atomic. Results are correlated
+        by clientRequestId and input record number.'
+      parameters:
+      - *id002
+      - *id003
+      - *id004
+      - *id005
+      requestBody:
+        required: true
+        description: 'Select exactly one input form: JSON request body, NDJSON request body, or multipart form.
+          Within multipart form data, file is an optional field: provide file or messages, but not both. The file
+          field accepts a JSON or JSONL file. preserveOrder is optional.'
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchPublishRequest'
+            example:
+              messages:
+              - destination: payment.events
+                messagingMode: JETSTREAM
+                payload: eyJhbW91bnQiOjEwMH0=
+                contentType: application/json
+                clientRequestId: req-payment-10001
+              - destination: payment.events
+                messagingMode: JETSTREAM
+                payload: eyJhbW91bnQiOjIwMH0=
+                contentType: application/json
+                clientRequestId: req-payment-10002
+              preserveOrder: true
+          application/x-ndjson:
+            schema:
+              type: string
+              format: binary
+              description: 'NDJSON request body: one complete PublishRequest JSON object per line.'
+            example: '{"destination":"payment.events","messagingMode":"JETSTREAM","payload":"eyJhbW91bnQiOjEwMH0=","contentType":"application/json","clientRequestId":"req-payment-10001"}\n{"destination":"payment.events","messagingMode":"JETSTREAM","payload":"eyJhbW91bnQiOjIwMH0=","contentType":"application/json","clientRequestId":"req-payment-10002"}'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/BatchPublishMultipartRequest'
+            encoding:
+              messages:
+                contentType: application/json
+              file:
+                contentType: application/json, application/x-ndjson
+            examples:
+              fileUpload:
+                summary: Upload a JSONL file
+                description: The file field is supplied; messages is omitted.
+                value:
+                  file: (binary JSONL file)
+                  preserveOrder: true
+              inlineMessages:
+                summary: Supply messages as a multipart field
+                description: The messages field is supplied; file is omitted.
+                value:
+                  messages:
+                  - destination: payment.events
+                    messagingMode: JETSTREAM
+                    payload: eyJhbW91bnQiOjEwMH0=
+                    contentType: application/json
+                    clientRequestId: req-payment-10001
+                  preserveOrder: true
+      responses:
+        '200':
+          description: Per-message publish outcomes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchPublishResponse'
+              example:
+                total: 2
+                accepted: 1
+                failed: 1
+                results:
+                - index: 0
+                  clientRequestId: req-payment-10001
+                  messageId: payment-Pay-2026-000184-created
+                  status: ACCEPTED
+                  accepted: true
+                  persistenceAcknowledged: true
+                - index: 1
+                  clientRequestId: req-payment-10002
+                  messageId: payment-Pay-2026-000185-created
+                  status: FAILED
+                  accepted: false
+                  error:
+                    code: DESTINATION_UNAVAILABLE
+                    message: Destination is temporarily unavailable.
+                    retryable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/messages/batch-async:
+    post:
+      tags:
+      - Publishing
+      operationId: publishMessageBatchAsync
+      summary: Submit an asynchronous batch
+      description: 'Submits a large batch for asynchronous processing and returns an operation ID. Choose one request
+        representation: an application/json body with a messages array, an application/x-ndjson body with one PublishRequest
+        JSON object per line, or multipart/form-data. For multipart/form-data, the optional file field accepts a
+        JSON or JSONL file; alternatively, provide the messages field. Do not provide both file and messages. The
+        preserveOrder field is optional. Record-count, request-size, file-size and decoded-payload limits are enforced
+        by platform policy. Each record is processed independently; the batch is not atomic. Results are correlated
+        by clientRequestId and input record number.'
+      parameters:
+      - *id002
+      - *id003
+      - *id004
+      - *id005
+      requestBody:
+        required: true
+        description: 'Select exactly one input form: JSON request body, NDJSON request body, or multipart form.
+          Within multipart form data, file is an optional field: provide file or messages, but not both. The file
+          field accepts a JSON or JSONL file. preserveOrder is optional.'
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsyncBatchPublishRequest'
+            example:
+              messages:
+              - destination: payment.events
+                messagingMode: JETSTREAM
+                payload: eyJhbW91bnQiOjEwMH0=
+                contentType: application/json
+                messageId: payment-10001-created
+                clientRequestId: bulk-pay-000001
+              - destination: payment.events
+                messagingMode: JETSTREAM
+                payload: eyJhbW91bnQiOjIwMH0=
+                contentType: application/json
+                messageId: payment-10002-created
+                clientRequestId: bulk-pay-000002
+              preserveOrder: true
+          application/x-ndjson:
+            schema:
+              type: string
+              format: binary
+              description: 'NDJSON request body: one complete PublishRequest JSON object per line.'
+            example: '{"destination":"payment.events","messagingMode":"JETSTREAM","payload":"eyJhbW91bnQiOjEwMH0=","contentType":"application/json","clientRequestId":"bulk-pay-000001"}\n{"destination":"payment.events","messagingMode":"JETSTREAM","payload":"eyJhbW91bnQiOjIwMH0=","contentType":"application/json","clientRequestId":"bulk-pay-000002"}'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AsyncBatchPublishMultipartRequest'
+            encoding:
+              messages:
+                contentType: application/json
+              file:
+                contentType: application/json, application/x-ndjson
+            examples:
+              fileUpload:
+                summary: Upload a JSONL file
+                description: The file field is supplied; messages is omitted.
+                value:
+                  file: (binary JSONL file)
+                  preserveOrder: true
+              inlineMessages:
+                summary: Supply messages as a multipart field
+                description: The messages field is supplied; file is omitted.
+                value:
+                  messages:
+                  - destination: payment.events
+                    messagingMode: JETSTREAM
+                    payload: eyJhbW91bnQiOjEwMH0=
+                    contentType: application/json
+                    clientRequestId: bulk-pay-000001
+                  preserveOrder: true
+      responses:
+        '202':
+          description: Batch accepted for asynchronous processing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationAccepted'
+              example:
+                operationId: op-bulk-payments-20261103-001
+                status: ACCEPTED
+                submittedAt: '2026-11-03T08:45:00Z'
+                statusUrl: /api/v1/operations/op-bulk-payments-20261103-001
+                resultsUrl: /api/v1/operations/op-bulk-payments-20261103-001/results
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/requests:
+    post:
+      tags:
+      - Request Reply
+      operationId: sendRequest
+      summary: Send request and await reply
+      description: Sends a request to an authorized logical destination and waits for a correlated reply up to timeoutMs.
+        Request/reply is transient and best-effort; it does not provide durable request or reply storage. A timeout
+        does not prove that the responder did not process the request. Applications must use a business correlation/idempotency
+        strategy before retrying.
+      parameters: &id006
+      - *id002
+      - *id003
+      - *id004
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestReplyRequest'
+            example:
+              destination: payment.validation.requests
+              messagingMode: CORE
+              payload: eyJwYXltZW50SWQiOiJQYXktMTAwMSJ9
+              contentType: application/json
+              timeoutMs: 3000
+        description: Request message and timeout configuration.
+      responses:
+        '200':
+          description: Reply received.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestReplyResponse'
+              example:
+                destination: payment.validation.responses
+                payload: eyJwYXltZW50SWQiOiJQQVktMTAwMSIsInZhbGlkIjoiVFJVRSJ9
+                contentType: application/json
+                headers:
+                  responder: payment-validation-service
+                correlationId: corr-pay-1001
+                respondedAt: '2026-11-03T08:31:00Z'
+        '504':
+          description: No reply received before timeout.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: REQUEST_TIMEOUT
+                message: No responder replied before timeout.
+                correlationId: corr-payment-1001
+                retryable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/messages/reprocess:
+    post:
+      tags:
+      - Replay and Reprocessing
+      operationId: reprocessMessages
+      summary: Reprocess selected messages
+      description: Submits selected stored message IDs for controlled reprocessing. The platform validates source/target
+        destination permissions and retention, records an asynchronous operation, and reports per-message outcomes.
+        Reprocessing publishes a new delivery/message to the target destination; it does not rewind the original
+        consumer cursor.
+      parameters: *id006
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReprocessRequest'
+            example:
+              sourceDestination: payment.events
+              messageIds:
+              - msg-01JBF8KQ7M4T2X9A
+              - msg-01JBF8M2Z8Q6W4P1
+              targetDestination: payment.events.reprocessed
+              reason: Reprocess after correcting downstream validation.
+        description: Source message selection, target destination and reason for reprocessing.
+      responses:
+        '202':
+          description: Reprocessing operation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncOperationAccepted'
+              example:
+                operationId: op-reprocess-payments-001
+                status: ACCEPTED
+                submittedAt: '2026-11-03T09:00:00Z'
+                statusUrl: /api/v1/operations/op-reprocess-payments-001
+                resultsUrl: /api/v1/operations/op-reprocess-payments-001/results
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/operations/{operationId}:
+    get:
+      tags:
+      - Monitoring
+      operationId: getOperation
+      summary: Get asynchronous operation status
+      description: Returns operation state and progress counts. Retrieve individual message outcomes through GET
+        /api/v1/operations/{operationId}/results.
+      parameters:
+      - name: operationId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued identifier returned when an asynchronous operation is accepted.
+      responses:
+        '200':
+          description: Operation status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              example:
+                operationId: op-bulk-payments-20261103-001
+                status: RUNNING
+                submittedAt: '2026-11-03T08:45:00Z'
+                startedAt: '2026-11-03T08:45:02Z'
+                totalCount: 100000
+                processedCount: 62500
+                acceptedCount: 62000
+                failedCount: 500
+                skippedCount: 0
+                progressPercentage: 62.5
+                resultsUrl: /api/v1/operations/op-bulk-payments-20261103-001/results
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/health/live:
+    get:
+      tags:
+      - Health
+      operationId: liveness
+      summary: Check API liveness
+      description: Unauthenticated process liveness probe.
+      responses:
+        '200':
+          description: API process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: UP
+      security: []
+  /api/v1/health/ready:
+    get:
+      tags:
+      - Health
+      operationId: readiness
+      summary: Check API readiness
+      description: Unauthenticated readiness probe including required messaging dependencies.
+      responses:
+        '200':
+          description: API is ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example:
+                status: UP
+                dependencies:
+                  messaging: UP
+                  authorization: UP
+        '503':
+          description: API is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example:
+                status: DOWN
+                dependencies:
+                  messaging: DOWN
+                  authorization: UP
+      security: []
+  /api/v1/consumers:
+    get:
+      tags:
+      - Consumers
+      operationId: listConsumers
+      summary: List application consumers
+      description: Lists consumer resources provisioned by Platform/Admin and made available to the authenticated
+        application. Applications cannot create, update or delete managed consumers through this API.
+      parameters:
+      - name: destination
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Filter results by logical destination name.
+      - name: messagingMode
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - CORE
+          - JETSTREAM
+        description: Filter results by messaging mode.
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - FAILED
+        description: Filter results by the resource or operation status values documented for this endpoint.
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+        description: Maximum number of items to return in this page.
+      - name: pageToken
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque token returned by the previous page; omit it for the first page.
+      responses:
+        '200':
+          description: Page of logical consumers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsumerList'
+              example:
+                items:
+                - &id007
+                  consumerId: con-payment-001
+                  consumerName: payment-worker
+                  destination: payment.events
+                  messagingMode: JETSTREAM
+                  deliveryMode: PULL
+                  status: ACTIVE
+                  createdAt: '2026-11-01T10:00:00Z'
+                  capabilities:
+                  - PULL
+                  - ACKNOWLEDGEMENT
+                  - REPLAY
+                nextPageToken: next-page-token
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/consumers/{consumerId}:
+    get:
+      tags:
+      - Consumers
+      operationId: getConsumer
+      summary: Get consumer details
+      description: Returns an application-visible consumer provisioned and managed through the Admin API. Native
+        stream names, subjects and durable names are not returned.
+      parameters:
+      - name: consumerId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued logical consumer identifier provisioned through the Admin API.
+      responses:
+        '200':
+          description: Consumer details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Consumer'
+              example: *id007
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}/pull:
+    post:
+      tags:
+      - Consumption
+      operationId: pullMessages
+      summary: Pull messages
+      description: Fetches a batch from an ACTIVE PULL-mode JETSTREAM subscription. Each item contains an opaque
+        deliveryId for settlement. The server must enforce the consumer's configured maxAckPending, ackWait and
+        policy limits. CORE and PUSH subscriptions do not support pull. An empty items array means no messages were
+        available before expiry.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime subscription handle returned by POST /api/v1/subscriptions.
+      - *id002
+      - *id003
+      - *id004
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PullRequest'
+            example:
+              batchSize: 20
+              expiresInMs: 5000
+        description: Pull batch size and maximum wait duration.
+      responses:
+        '200':
+          description: Fetched messages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PullResponse'
+              example:
+                items:
+                - messageId: msg-pay-20261103-000184
+                  deliveryId: dly-pay-20261103-000184-01
+                  destination: payment.events
+                  messagingMode: JETSTREAM
+                  payload: eyJvcmRlcklkIjoiT1JELTIwMjYtMTA0ODIiLCJwYXltZW50SWQiOiJQQVktOTg3NjU0MzIxIiwic3RhdHVzIjoiU1VDQ0VTUyJ9
+                  contentType: application/json
+                  headers:
+                    source: payment-service
+                    eventType: PAYMENT_SUCCESS
+                  correlationId: corr-order-2026-10482
+                  publishedAt: '2026-11-03T08:30:15Z'
+                  delivery:
+                    attempt: 1
+                    deliveredAt: '2026-11-03T08:30:16Z'
+                    acknowledgementDeadline: '2026-11-03T08:31:16Z'
+                receivedCount: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/subscriptions/{subscriptionId}/events:
+    get:
+      tags:
+      - Consumption
+      operationId: streamConsumerEvents
+      summary: Receive messages over SSE
+      description: 'Opens an SSE connection for an ACTIVE PUSH subscription. The server emits message events with
+        a stable opaque event ID/deliveryId, plus heartbeat events. Clients should reconnect using Last-Event-ID
+        where supported. For JETSTREAM, reconnect does not replace explicit ACK/NAK settlement. CORE is transient:
+        messages sent while disconnected may be lost and replay/acknowledgement are unavailable. For JETSTREAM message
+        events, deliveryId is included and must be settled through the acknowledgement API. For CORE events, no
+        deliveryId or settlement action is provided; CORE delivery is best-effort.'
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime subscription handle returned by POST /api/v1/subscriptions.
+      - *id002
+      - *id003
+      - *id004
+      - name: Last-Event-ID
+        in: header
+        required: false
+        schema:
+          type: string
+        description: Optional SSE event identifier from the last event fully processed by the client; used to resume
+          the event stream where supported.
+      responses:
+        '200':
+          description: SSE event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: 'id: evt-10001
+
+                event: message
+
+                data: {"messageId":"payment-Pay-2026-000184-created","deliveryId":"dly-10001","destination":"payment.events","messagingMode":"JETSTREAM","payload":"eyJwYXltZW50SWQiOiJQYXktMTAwMSJ9","contentType":"application/json"}
+
+
+                event: heartbeat
+
+                data: {"timestamp":"2026-11-03T10:30:15Z"}
+
+                '
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/CursorExpired'
+  /api/v1/subscriptions/{subscriptionId}/acknowledgements:
+    post:
+      tags:
+      - Delivery
+      operationId: settleDelivery
+      summary: Acknowledge or settle a delivery
+      description: Settles a JETSTREAM delivery using ACK, NAK, IN_PROGRESS or TERM. The deliveryId must have been
+        issued to this application for this subscription. CORE subscriptions do not support this operation. Repeated
+        or expired settlement attempts return a conflict or an explicit already-settled result.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime subscription handle returned by POST /api/v1/subscriptions.
+      - *id002
+      - *id003
+      - *id004
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryActionRequest'
+            example:
+              deliveryId: dly-10001
+              action: ACK
+              metadata:
+                processedBy: payment-processor
+                processingResult: SUCCESS
+        description: Settlement action and delivery identifier.
+      responses:
+        '200':
+          description: Delivery action result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryActionResponse'
+              example:
+                deliveryId: dly-10001
+                action: ACK
+                accepted: true
+                settledAt: '2026-11-03T09:15:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/subscriptions/{subscriptionId}/replays:
+    post:
+      tags:
+      - Replay and Reprocessing
+      operationId: replayConsumerMessages
+      summary: Create an isolated replay session
+      description: Creates an isolated replay session for a JETSTREAM subscription. The returned session is immediately
+        available for replay pulls. It has its own cursor and never rewinds or modifies the live subscription cursor.
+        Creation is synchronous and subject to retention, authorization and replay quotas.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime subscription handle returned by POST /api/v1/subscriptions.
+      - *id002
+      - *id003
+      - *id004
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayRequest'
+            example:
+              startPosition: TIMESTAMP
+              startAt: '2026-11-01T00:00:00Z'
+              endAt: '2026-11-02T00:00:00Z'
+              reason: Reconcile payment events for the previous business day.
+        description: Replay start/end boundaries and reason.
+      responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '201':
+          description: Replay session created and ready for consumption.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplaySession'
+              example:
+                replaySessionId: rpl-pay-20261103-001
+                subscriptionId: sub-payment-001
+                destination: payment.events
+                status: ACTIVE
+                createdAt: '2026-11-03T13:50:00+05:30'
+                expiresAt: '2026-11-03T15:50:00+05:30'
+                messagesAvailable: 1250
+                pullUrl: /api/v1/replay-sessions/rpl-pay-20261103-001/pull
+                reason: Reconcile previous business day
+  /api/v1/subscriptions/{subscriptionId}/metrics:
+    get:
+      tags:
+      - Monitoring
+      operationId: getConsumerMetrics
+      summary: Get consumer metrics
+      description: Returns application-visible delivery metrics for the managed consumer associated with this subscription.
+        Metrics are snapshots and may be eventually consistent; native stream and consumer identifiers are not exposed.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime subscription handle returned by POST /api/v1/subscriptions.
+      - *id002
+      - *id003
+      - *id004
+      responses:
+        '200':
+          description: Consumer metrics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsumerMetrics'
+              example:
+                consumerId: con-payment-001
+                status: ACTIVE
+                pendingMessages: 120
+                ackPending: 4
+                redeliveredMessages: 2
+                deliveredMessages: 15230
+                lastDeliveryAt: '2026-11-03T09:14:58Z'
+                observedAt: '2026-11-03T09:15:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}/dead-letter-messages:
+    get:
+      tags:
+      - Monitoring
+      operationId: listDeadLetterMessages
+      summary: List dead-letter messages
+      description: Lists dead-letter messages visible to this application for the managed consumer. Available only
+        when the destination/consumer policy enables dead-letter handling. Returned delivery handles are not automatically
+        acknowledgeable on the original subscription.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime subscription handle returned by POST /api/v1/subscriptions.
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+        description: Maximum number of items to return in this page.
+      - name: pageToken
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque token returned by the previous page; omit it for the first page.
+      responses:
+        '200':
+          description: Dead-letter message page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadLetterMessageList'
+              example:
+                items:
+                - messageId: msg-pay-failed-001
+                  destination: payment.events
+                  payload: eyJwYXltZW50SWQiOiJQQVktMTAwMSJ9
+                  failedAt: '2026-11-03T08:00:00Z'
+                  failureReason: MAX_DELIVERIES_EXCEEDED
+                  deliveryAttempts: 5
+                  reprocessable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions:
+    post:
+      tags:
+      - Subscriptions
+      summary: Create an application subscription handle
+      description: Creates an application runtime handle for an existing consumer provisioned by the Admin API.
+        It does not create or modify a native consumer/durable. The platform validates application access, consumer
+        status and delivery mode. Multiple runtime handles may attach to a shared managed consumer only where its
+        policy permits.
+      operationId: createSubscription
+      parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+      - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSubscriptionRequest'
+            example:
+              consumerId: con-payment-001
+              clientInstanceId: payment-worker-instance-07
+        description: Existing Admin-provisioned consumer to attach to and client runtime instance identity.
+      responses:
+        '201':
+          description: Subscription handle created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+              example:
+                subscriptionId: sub-payment-001
+                consumerId: con-payment-001
+                destination: payment.events
+                messagingMode: JETSTREAM
+                deliveryMode: PULL
+                status: ACTIVE
+                createdAt: '2026-11-03T10:30:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+    get:
+      tags:
+      - Subscriptions
+      summary: List application subscriptions
+      description: Lists runtime subscription handles belonging to the authenticated application.
+      operationId: listSubscriptions
+      parameters:
+      - name: consumerId
+        in: query
+        schema:
+          type: string
+        description: Filter runtime subscription handles by their Admin-provisioned consumer identifier.
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - CLOSED
+        description: Filter results by the resource or operation status values documented for this endpoint.
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+        description: Maximum number of items to return in this page.
+      - name: pageToken
+        in: query
+        schema:
+          type: string
+        description: Opaque token returned by the previous page; omit it for the first page.
+      responses:
+        '200':
+          description: Subscription list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionList'
+              example:
+                items:
+                - subscriptionId: sub-payment-001
+                  consumerId: con-payment-001
+                  destination: payment.events
+                  messagingMode: JETSTREAM
+                  deliveryMode: PULL
+                  status: ACTIVE
+                  createdAt: '2026-11-03T08:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}:
+    get:
+      tags:
+      - Subscriptions
+      summary: Get subscription details
+      operationId: getSubscription
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        description: Platform-issued application subscription handle.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      responses:
+        '200':
+          description: Subscription details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+              example:
+                subscriptionId: sub-payment-001
+                consumerId: con-payment-001
+                destination: payment.events
+                messagingMode: JETSTREAM
+                deliveryMode: PULL
+                status: ACTIVE
+                createdAt: '2026-11-03T08:00:00Z'
+                eventsUrl: /api/v1/subscriptions/sub-payment-001/events
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      description: Returns the current state and configuration visible to this application for the specified runtime
+        subscription handle. It does not expose or modify the underlying Admin-managed consumer.
+    patch:
+      tags:
+      - Subscriptions
+      summary: Pause or resume a subscription
+      description: Pauses or resumes this runtime subscription handle only. It does not alter the Admin-managed
+        consumer configuration. On pause, the server stops issuing new deliveries; already-issued JetStream deliveries
+        remain subject to their acknowledgement deadlines and redelivery policy.
+      operationId: updateSubscription
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        description: Platform-issued application subscription handle.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSubscriptionRequest'
+            example:
+              status: PAUSED
+        description: New runtime subscription state. Only PAUSED or ACTIVE is accepted.
+      responses:
+        '200':
+          description: Subscription state updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+              example:
+                subscriptionId: sub-payment-001
+                consumerId: con-payment-001
+                destination: payment.events
+                messagingMode: JETSTREAM
+                deliveryMode: PULL
+                status: ACTIVE
+                createdAt: '2026-11-03T08:00:00Z'
+                eventsUrl: /api/v1/subscriptions/sub-payment-001/events
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+    delete:
+      tags:
+      - Subscriptions
+      summary: Close a subscription handle
+      description: Closes this application runtime handle and releases its connection/resources. It does not delete
+        or reset the Admin-managed consumer or durable delivery position.
+      operationId: closeSubscription
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        description: Platform-issued application subscription handle.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      responses:
+        '204':
+          description: Subscription handle closed. Underlying managed consumer is not deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/subscriptions/{subscriptionId}/acknowledgements/batch:
+    post:
+      tags:
+      - Delivery
+      operationId: settleDeliveriesBatch
+      summary: Settle multiple message deliveries
+      description: Applies one settlement action to multiple delivery IDs issued to this subscription. JETSTREAM
+        only. Each result is reported independently; partial success is possible.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description: Platform-issued runtime subscription handle returned by POST /api/v1/subscriptions.
+      - $ref: '#/components/parameters/CorrelationId'
+      - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchDeliveryActionRequest'
+            example:
+              action: ACK
+              deliveryIds:
+              - dly-01J9PAY001
+              - dly-01J9PAY002
+              - dly-01J9PAY003
+        description: One settlement action and the delivery identifiers to which it applies.
+      responses:
+        '200':
+          description: Per-delivery settlement results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchDeliveryActionResponse'
+              example:
+                total: 2
+                accepted: 2
+                failed: 0
+                results:
+                - deliveryId: dly-10001
+                  accepted: true
+                  settledAt: '2026-11-03T09:15:00Z'
+                - deliveryId: dly-10002
+                  accepted: true
+                  settledAt: '2026-11-03T09:15:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/subscriptions/{subscriptionId}/dead-letter-messages/{messageId}:
+    get:
+      tags:
+      - Monitoring
+      operationId: getDeadLetterMessage
+      summary: Get a dead-letter message
+      description: Returns the stored dead-letter record and failure metadata. Access is limited to messages associated
+        with the application's authorized subscription. This is read-only; use the reprocess API to submit an authorized
+        message for reprocessing.
+      parameters:
+      - name: subscriptionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued runtime subscription handle returned by POST /api/v1/subscriptions.
+      - name: messageId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Message identifier of the dead-letter record.
+      - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Dead-letter message details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadLetterMessage'
+              example:
+                messageId: msg-pay-failed-001
+                destination: payment.events
+                payload: eyJwYXltZW50SWQiOiJQQVktMTAwMSJ9
+                failedAt: '2026-11-03T08:00:00Z'
+                failureReason: MAX_DELIVERIES_EXCEEDED
+                deliveryAttempts: 5
+                reprocessable: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/operations/{operationId}/results:
+    get:
+      tags:
+      - Monitoring
+      operationId: getOperationResults
+      summary: Get paginated per-message outcomes
+      description: Returns paginated per-record outcomes for an asynchronous batch or other supported bulk operation.
+        Use nextPageToken until no further page is returned. Results are correlated using recordNumber and clientRequestId;
+        do not assume a batch is atomic.
+      parameters:
+      - name: operationId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description: Platform-issued identifier returned when an asynchronous operation is accepted.
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - ACCEPTED
+          - FAILED
+          - SKIPPED
+        description: Filter results by the resource or operation status values documented for this endpoint.
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 100
+        description: Maximum number of items to return in this page.
+      - name: pageToken
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque token returned by the previous page; omit it for the first page.
+      responses:
+        '200':
+          description: Page of per-message outcomes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResultPage'
+              example:
+                operationId: op-bulk-payments-20261103-001
+                totalCount: 100000
+                nextPageToken: eyJvZmZzZXQiOjEwMH0=
+                items:
+                - recordNumber: 1
+                  clientRequestId: bulk-pay-000001
+                  messageId: msg-pay-000001
+                  status: ACCEPTED
+                  persistenceAcknowledged: true
+                - recordNumber: 2
+                  clientRequestId: bulk-pay-000002
+                  messageId: msg-pay-000002
+                  status: FAILED
+                  error:
+                    code: PAYLOAD_INVALID
+                    message: Payload is not valid base64.
+                    retryable: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/operations/{operationId}/retry:
+    post:
+      tags:
+      - Publishing
+      operationId: retryOperationFailures
+      summary: Retry failed operation entries
+      description: Starts a retry operation for eligible failed records from the original asynchronous batch. Only
+        retryable failures are retried by default. The retry is a new asynchronous operation and does not alter
+        the original operation's recorded results.
+      parameters:
+      - name: operationId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued identifier returned when an asynchronous operation is accepted.
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: Stable key used to deduplicate retries of this retry request within the configured idempotency
+          window.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryOperationRequest'
+            example:
+              resultFilter: RETRYABLE_FAILED
+        description: Optional filter selecting eligible failed records. Supply idempotency through the Idempotency-Key
+          header.
+      responses:
+        '202':
+          description: Retry operation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetryOperationResponse'
+              example:
+                operationId: op-bulk-payments-20261103-001
+                retryOperationId: op-retry-payments-20261103-001
+                status: ACCEPTED
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/replay-sessions/{replaySessionId}:
+    get:
+      tags:
+      - Replay and Reprocessing
+      operationId: getReplaySession
+      summary: Get replay session status
+      parameters:
+      - name: replaySessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued identifier returned when a replay session is created.
+      responses:
+        '200':
+          description: Replay session details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplaySession'
+              example:
+                replaySessionId: rpl-pay-001
+                subscriptionId: sub-payment-001
+                destination: payment.events
+                status: ACTIVE
+                createdAt: '2026-11-03T09:00:00Z'
+                expiresAt: '2026-11-03T10:00:00Z'
+                messagesAvailable: 250
+                pullUrl: /api/v1/replay-sessions/rpl-pay-001/pull
+                reason: Reconcile payment events
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/CursorExpired'
+      description: Returns the status and replay boundaries for the isolated replay session. The session has its
+        own cursor and does not change the live subscription's delivery position.
+    delete:
+      tags:
+      - Replay and Reprocessing
+      operationId: closeReplaySession
+      summary: Close replay session
+      description: Closes only the isolated replay session. Does not change the original subscription or its durable
+        cursor.
+      parameters:
+      - name: replaySessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued identifier returned when a replay session is created.
+      responses:
+        '204':
+          description: Replay session closed.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/replay-sessions/{replaySessionId}/pull:
+    post:
+      tags:
+      - Replay and Reprocessing
+      operationId: pullReplayMessages
+      summary: Pull messages from replay session
+      description: Fetches replay messages from the isolated replay cursor. Settlement is scoped to replay delivery
+        handles and never changes the live subscription cursor.
+      parameters:
+      - name: replaySessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued identifier returned when a replay session is created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayPullRequest'
+            example:
+              batchSize: 100
+              expiresInMs: 5000
+              maxBytes: 10485760
+        description: Replay pull batch size, wait duration and optional maximum response bytes.
+      responses:
+        '200':
+          description: Replay messages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayPullResponse'
+              example:
+                items:
+                - messageId: msg-pay-historical-001
+                  deliveryId: rpl-dly-pay-001
+                  destination: payment.events
+                  messagingMode: JETSTREAM
+                  payload: eyJwYXltZW50SWQiOiJQQVktOTg3NjU0MzIxIiwic3RhdHVzIjoiU1VDQ0VTUyJ9
+                  contentType: application/json
+                  publishedAt: '2026-11-01T10:15:00Z'
+                  delivery:
+                    attempt: 1
+                    deliveredAt: '2026-11-03T08:50:00Z'
+                    acknowledgementDeadline: '2026-11-03T08:51:00Z'
+                receivedCount: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/CursorExpired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+  /api/v1/replay-sessions/{replaySessionId}/acknowledgements:
+    post:
+      tags:
+      - Replay and Reprocessing
+      operationId: settleReplayDelivery
+      summary: Settle replay delivery
+      description: Settles a delivery issued by this replay session. The deliveryId must belong to this replay session.
+        CORE is not supported.
+      parameters:
+      - name: replaySessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Platform-issued identifier returned when a replay session is created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryActionRequest'
+            example:
+              deliveryId: rpl-dly-00001
+              action: ACK
+        description: Settlement action for a delivery issued by this replay session.
+      responses:
+        '200':
+          description: Replay delivery settlement result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryActionResponse'
+              example:
+                deliveryId: dly-10001
+                action: ACK
+                accepted: true
+                settledAt: '2026-11-03T09:15:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+      description: Optional application-generated correlation identifier propagated through the request for log
+        and trace correlation.
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: Optional W3C Trace Context traceparent header used to propagate distributed tracing context.
+      schema:
+        type: string
+        maxLength: 256
+  schemas:
+    Error:
+      type: object
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+          example: DESTINATION_NOT_FOUND
+        message:
+          type: string
+          example: The requested destination is not available to this application.
+        correlationId:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        retryable:
+          type: boolean
+          description: Whether retrying the same logical request may succeed without changing its contents.
+        fieldErrors:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+        retryAfterMs:
+          type: integer
+          minimum: 0
+      description: Standard error response returned when an API request cannot be completed.
+    MessagingMode:
+      type: string
+      enum:
+      - CORE
+      - JETSTREAM
+      description: 'Messaging delivery mode selected for the operation: CORE or JETSTREAM.'
+    Destination:
+      type: object
+      required:
+      - destination
+      - supportedModes
+      - access
+      - status
+      properties:
+        destination:
+          type: string
+          example: payment.events
+        description:
+          type: string
+        supportedModes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessagingMode'
+        access:
+          type: array
+          items:
+            type: string
+            enum:
+            - PUBLISH
+            - SUBSCRIBE
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - SUSPENDED
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum:
+            - PUBLISH
+            - BATCH_PUBLISH
+            - REQUEST_REPLY
+            - PULL
+            - PUSH
+            - ACKNOWLEDGEMENT
+            - REPLAY
+            - DEAD_LETTER
+      description: Application-visible logical destination and its supported capabilities; native routing identifiers
+        are omitted.
+    DestinationList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Destination'
+        nextPageToken:
+          type: string
+      description: Paginated list of logical destinations available to the authenticated application.
+    Consumer:
+      type: object
+      required:
+      - consumerId
+      - consumerName
+      - destination
+      - messagingMode
+      - deliveryMode
+      - status
+      - createdAt
+      properties:
+        consumerId:
+          type: string
+          example: con-payment-001
+        consumerName:
+          type: string
+          example: payment-processor
+        destination:
+          type: string
+          example: payment.events
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        deliveryMode:
+          type: string
+          enum:
+          - PULL
+          - PUSH
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - FAILED
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        capabilities:
+          type: array
+          items:
+            type: string
+        configuration:
+          type: object
+          description: Effective application-visible settings; platform-controlled native settings may be omitted.
+          properties:
+            startPosition:
+              type: string
+            filter:
+              type: object
+              additionalProperties:
+                type: string
+      description: Application-visible reference to an Admin-provisioned consumer. Native stream and durable names
+        are omitted.
+    ConsumerList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Consumer'
+        nextPageToken:
+          type: string
+      description: Paginated list of Admin-provisioned consumers available to the authenticated application.
+    PublishRequest:
+      type: object
+      required:
+      - clientRequestId
+      - destination
+      - messagingMode
+      - payload
+      properties:
+        destination:
+          type: string
+          example: payment.events
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        payload:
+          type: string
+          format: byte
+          maxLength: 13981016
+          description: Base64-encoded bytes. Maximum decoded size is 10 MiB unless destination policy specifies
+            a lower limit.
+        contentType:
+          type: string
+          maxLength: 128
+          default: application/json
+        headers:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: string
+            maxLength: 1024
+        messageId:
+          type: string
+          maxLength: 128
+          description: Optional caller-assigned business message ID. Must be unique within the destination/idempotency
+            scope.
+        key:
+          type: string
+          description: Optional business key used for grouping or ordering where supported.
+        timeoutMs:
+          type: integer
+          minimum: 1
+          maximum: 60000
+          default: 5000
+        clientRequestId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Stable caller-generated identifier used to correlate this input with its outcome.
+      description: One message to publish to a logical destination. payload contains base64-encoded bytes.
+    PublishResponse:
+      type: object
+      required:
+      - clientRequestId
+      - messageId
+      - destination
+      - messagingMode
+      - status
+      - accepted
+      properties:
+        messageId:
+          type: string
+        destination:
+          type: string
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        accepted:
+          type: boolean
+        publishedAt:
+          type: string
+          format: date-time
+        persistenceAcknowledged:
+          type: boolean
+        correlationId:
+          type: string
+        clientRequestId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - FAILED
+        sequence:
+          type: integer
+          minimum: 1
+          description: Optional platform-safe publish sequence; only present when policy permits exposing it.
+      description: Acknowledgement and assigned identifiers for a published message.
+    BatchPublishRequest:
+      type: object
+      required:
+      - messages
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/PublishRequest'
+        preserveOrder:
+          type: boolean
+          default: true
+      description: JSON request representation for synchronous batch publishing (maximum 1,000 messages).
+    BatchPublishResponse:
+      type: object
+      required:
+      - total
+      - accepted
+      - failed
+      - results
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        accepted:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchPublishItemResult'
+      description: Per-message outcomes for a synchronous batch. A batch can contain both accepted and failed messages.
+    AsyncBatchPublishRequest:
+      type: object
+      required:
+      - messages
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/PublishRequest'
+          description: Messages are processed independently. Each item must include a unique clientRequestId within
+            this submitted batch.
+        preserveOrder:
+          type: boolean
+          default: true
+      description: JSON request representation for asynchronous batch publishing. The maximum record count and request
+        size are controlled by platform policy.
+    AsyncOperationAccepted:
+      type: object
+      required:
+      - operationId
+      - status
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - RUNNING
+        submittedAt:
+          type: string
+          format: date-time
+        statusUrl:
+          type: string
+          format: uri-reference
+        resultsUrl:
+          type: string
+          format: uri-reference
+      description: Identifier and links for an accepted asynchronous operation.
+    RequestReplyRequest:
+      type: object
+      required:
+      - destination
+      - messagingMode
+      - payload
+      properties:
+        destination:
+          type: string
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        payload:
+          type: string
+          format: byte
+        contentType:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        timeoutMs:
+          type: integer
+          minimum: 1
+          maximum: 60000
+          default: 5000
+      description: Transient request/reply message and timeout configuration.
+    RequestReplyResponse:
+      type: object
+      required:
+      - destination
+      - payload
+      properties:
+        destination:
+          type: string
+        payload:
+          type: string
+          format: byte
+        contentType:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        correlationId:
+          type: string
+        respondedAt:
+          type: string
+          format: date-time
+      description: Correlated reply returned by the responder before the configured timeout.
+    PullRequest:
+      type: object
+      properties:
+        batchSize:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 10
+        expiresInMs:
+          type: integer
+          minimum: 1
+          maximum: 60000
+          default: 5000
+        maxBytes:
+          type: integer
+          minimum: 1
+          maximum: 104857600
+      description: Pull size and wait duration for an active PULL-mode JetStream subscription.
+    DeliveredMessage:
+      type: object
+      required:
+      - messageId
+      - deliveryId
+      - destination
+      - messagingMode
+      - payload
+      properties:
+        messageId:
+          type: string
+        deliveryId:
+          type: string
+          description: Opaque delivery handle; required for JetStream acknowledgement.
+        destination:
+          type: string
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        payload:
+          type: string
+          format: byte
+        contentType:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        correlationId:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        delivery:
+          type: object
+          properties:
+            attempt:
+              type: integer
+            deliveredAt:
+              type: string
+              format: date-time
+            acknowledgementDeadline:
+              type: string
+              format: date-time
+      description: Message envelope delivered to an application subscription, including an opaque delivery handle
+        when settlement applies.
+    PullResponse:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveredMessage'
+        receivedCount:
+          type: integer
+        nextToken:
+          type: string
+      description: Messages returned by a pull request. An empty items array means no message was available before
+        expiry.
+    DeliveryActionRequest:
+      type: object
+      required:
+      - deliveryId
+      - action
+      properties:
+        deliveryId:
+          type: string
+        action:
+          type: string
+          enum:
+          - ACK
+          - NAK
+          - IN_PROGRESS
+          - TERM
+        delayMs:
+          type: integer
+          minimum: 0
+          maximum: 86400000
+          description: Optional delay before redelivery; relevant to NAK.
+        extendMs:
+          type: integer
+          minimum: 1
+          maximum: 300000
+          description: Requested processing extension; relevant to IN_PROGRESS.
+        reason:
+          type: string
+          maxLength: 512
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+      description: Settlement action for one JetStream delivery.
+    DeliveryActionResponse:
+      type: object
+      required:
+      - deliveryId
+      - action
+      - accepted
+      properties:
+        deliveryId:
+          type: string
+        action:
+          type: string
+          enum:
+          - ACK
+          - NAK
+          - IN_PROGRESS
+          - TERM
+        accepted:
+          type: boolean
+        settledAt:
+          type: string
+          format: date-time
+      description: Outcome of settling one JetStream delivery.
+    ReplayRequest:
+      type: object
+      required:
+      - startPosition
+      - reason
+      properties:
+        startPosition:
+          type: string
+          enum:
+          - EARLIEST
+          - TIMESTAMP
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+        maxMessages:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+      description: Replay boundaries used to create an isolated replay session.
+    ReprocessRequest:
+      type: object
+      required:
+      - sourceDestination
+      - messageIds
+      properties:
+        sourceDestination:
+          type: string
+        messageIds:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: string
+        targetDestination:
+          type: string
+        reason:
+          type: string
+          maxLength: 512
+      description: Selection and target for publishing previously stored messages again as new messages.
+    ConsumerMetrics:
+      type: object
+      required:
+      - consumerId
+      - status
+      properties:
+        consumerId:
+          type: string
+        status:
+          type: string
+        pendingMessages:
+          type: integer
+        ackPending:
+          type: integer
+        redeliveredMessages:
+          type: integer
+        deliveredMessages:
+          type: integer
+        lastDeliveryAt:
+          type: string
+          format: date-time
+        observedAt:
+          type: string
+          format: date-time
+      description: Application-visible metrics for the managed consumer associated with a subscription.
+    DeadLetterMessageList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeadLetterMessage'
+        nextPageToken:
+          type: string
+      description: Paginated dead-letter records visible to the application.
+    Operation:
+      type: object
+      required:
+      - operationId
+      - status
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - RUNNING
+          - SUCCEEDED
+          - PARTIAL_SUCCESS
+          - FAILED
+        submittedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          $ref: '#/components/schemas/Error'
+        totalCount:
+          type: integer
+          minimum: 0
+        processedCount:
+          type: integer
+          minimum: 0
+        acceptedCount:
+          type: integer
+          minimum: 0
+        failedCount:
+          type: integer
+          minimum: 0
+        skippedCount:
+          type: integer
+          minimum: 0
+        progressPercentage:
+          type: number
+          minimum: 0
+          maximum: 100
+        startedAt:
+          type: string
+          format: date-time
+        resultCount:
+          type: integer
+          minimum: 0
+        resultsUrl:
+          type: string
+          format: uri-reference
+        failureReportUrl:
+          type: string
+          format: uri-reference
+      description: State and progress counters for an asynchronous operation.
+    Health:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - UP
+      description: Process liveness status.
+    Readiness:
+      type: object
+      required:
+      - status
+      - dependencies
+      properties:
+        status:
+          type: string
+          enum:
+          - UP
+          - DOWN
+        dependencies:
+          type: object
+          additionalProperties:
+            type: string
+            enum:
+            - UP
+            - DOWN
+            - DEGRADED
+      description: Readiness status and dependency checks for serving application requests.
+    CreateSubscriptionRequest:
+      type: object
+      required:
+      - consumerId
+      properties:
+        consumerId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: ID of a consumer provisioned by the Admin API and made available to this application.
+          example: con-payment-001
+        clientInstanceId:
+          type: string
+          maxLength: 128
+          description: Optional stable identifier for this application runtime instance.
+          example: payment-worker-instance-07
+      additionalProperties: false
+      description: Request to open a runtime subscription handle against an existing Admin-provisioned consumer.
+    Subscription:
+      type: object
+      required:
+      - subscriptionId
+      - consumerId
+      - destination
+      - messagingMode
+      - deliveryMode
+      - status
+      - createdAt
+      properties:
+        subscriptionId:
+          type: string
+          example: sub-payment-001
+        consumerId:
+          type: string
+          example: con-payment-001
+        destination:
+          type: string
+          example: payment.events
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        deliveryMode:
+          type: string
+          enum:
+          - PULL
+          - PUSH
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - CLOSED
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        eventsUrl:
+          type: string
+          format: uri-reference
+          description: Present for PUSH subscriptions.
+      description: Application runtime subscription handle and its visible delivery configuration.
+    SubscriptionList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Subscription'
+        nextPageToken:
+          type: string
+      description: Paginated list of runtime subscription handles owned by the authenticated application.
+    UpdateSubscriptionRequest:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+      additionalProperties: false
+      description: Request to pause or resume a runtime subscription handle.
+    BatchDeliveryActionRequest:
+      type: object
+      required:
+      - action
+      - deliveryIds
+      properties:
+        action:
+          type: string
+          enum:
+          - ACK
+          - NAK
+          - IN_PROGRESS
+          - TERM
+        deliveryIds:
+          type: array
+          minItems: 1
+          maxItems: 500
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+        delayMs:
+          type: integer
+          minimum: 0
+          maximum: 86400000
+          description: Optional redelivery delay for NAK.
+        extendMs:
+          type: integer
+          minimum: 1
+          maximum: 300000
+          description: Requested processing extension for IN_PROGRESS.
+        reason:
+          type: string
+          maxLength: 512
+      additionalProperties: false
+      description: One settlement action applied independently to multiple JetStream delivery handles.
+    BatchDeliveryActionResponse:
+      type: object
+      required:
+      - total
+      - accepted
+      - failed
+      - results
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        accepted:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        results:
+          type: array
+          items:
+            type: object
+            required:
+            - deliveryId
+            - accepted
+            properties:
+              deliveryId:
+                type: string
+              accepted:
+                type: boolean
+              settledAt:
+                type: string
+                format: date-time
+              error:
+                $ref: '#/components/schemas/Error'
+      description: Per-delivery outcomes for a batch settlement request.
+    DeadLetterMessage:
+      type: object
+      required:
+      - messageId
+      - destination
+      - payload
+      - failedAt
+      - failureReason
+      properties:
+        messageId:
+          type: string
+        destination:
+          type: string
+        payload:
+          type: string
+          format: byte
+          description: Base64-encoded original payload.
+        contentType:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        correlationId:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        failedAt:
+          type: string
+          format: date-time
+        deliveryAttempts:
+          type: integer
+          minimum: 1
+        failureReason:
+          type: string
+        lastError:
+          type: string
+        sourceConsumerId:
+          type: string
+        reprocessable:
+          type: boolean
+        originalMessageId:
+          type: string
+        reasonCode:
+          type: string
+      description: Stored dead-letter record with failure and original-message metadata.
+    FieldError:
+      type: object
+      required:
+      - field
+      - code
+      - message
+      properties:
+        field:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+      description: Validation error associated with a specific request field.
+    ReplaySession:
+      type: object
+      required:
+      - replaySessionId
+      - subscriptionId
+      - destination
+      - status
+      - createdAt
+      properties:
+        replaySessionId:
+          type: string
+        subscriptionId:
+          type: string
+        destination:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - COMPLETED
+          - CANCELLED
+          - EXPIRED
+          - FAILED
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        messagesAvailable:
+          type: integer
+          minimum: 0
+        pullUrl:
+          type: string
+          format: uri-reference
+        reason:
+          type: string
+      description: Isolated replay session with its own cursor and lifecycle state.
+    ReplayPullRequest:
+      type: object
+      properties:
+        batchSize:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 100
+        expiresInMs:
+          type: integer
+          minimum: 1
+          maximum: 60000
+          default: 5000
+        maxBytes:
+          type: integer
+          minimum: 1
+          maximum: 104857600
+      description: Batch size, wait duration and optional byte limit for pulling from a replay session.
+    ReplayPullResponse:
+      type: object
+      required:
+      - items
+      - receivedCount
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveredMessage'
+        receivedCount:
+          type: integer
+          minimum: 0
+        nextToken:
+          type: string
+      description: Messages delivered from an isolated replay session.
+    OperationResultPage:
+      type: object
+      required:
+      - operationId
+      - items
+      - totalCount
+      properties:
+        operationId:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationItemResult'
+        totalCount:
+          type: integer
+          minimum: 0
+        nextPageToken:
+          type: string
+      description: Paginated per-record outcomes for an asynchronous operation.
+    OperationItemResult:
+      type: object
+      required:
+      - recordNumber
+      - clientRequestId
+      - status
+      properties:
+        recordNumber:
+          type: integer
+          minimum: 1
+        clientRequestId:
+          type: string
+        messageId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - FAILED
+          - SKIPPED
+        persistenceAcknowledged:
+          type: boolean
+        error:
+          $ref: '#/components/schemas/Error'
+      description: Outcome for one input record in an asynchronous operation.
+    RetryOperationRequest:
+      type: object
+      properties:
+        resultFilter:
+          type: string
+          enum:
+          - FAILED
+          - RETRYABLE_FAILED
+          default: RETRYABLE_FAILED
+      description: Optional filters for selecting eligible failed records. Supply idempotency through the Idempotency-Key
+        request header.
+    RetryOperationResponse:
+      type: object
+      required:
+      - operationId
+      - retryOperationId
+      - status
+      properties:
+        operationId:
+          type: string
+        retryOperationId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - RUNNING
+      description: Identifier and status of the newly accepted retry operation.
+    BatchPublishItemResult:
+      type: object
+      required:
+      - index
+      - clientRequestId
+      - status
+      - accepted
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          description: Zero-based index of the input message in the submitted batch.
+        clientRequestId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Echoes the corresponding input message clientRequestId.
+        messageId:
+          type: string
+          description: Echoes the caller-assigned messageId or returns the platform-assigned message identifier.
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - FAILED
+        accepted:
+          type: boolean
+        persistenceAcknowledged:
+          type: boolean
+          description: Present for JETSTREAM when the platform has received the JetStream publish acknowledgement.
+        error:
+          $ref: '#/components/schemas/Error'
+      description: Outcome for one input message. Results are returned in input order and correlated by index and
+        clientRequestId.
+    BatchPublishMultipartRequest:
+      type: object
+      description: Multipart form. Supply exactly one of messages or file. The file field is optional when messages
+        is supplied.
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/PublishRequest'
+          description: Optional JSON array of messages. Use this field instead of file when not uploading a file.
+        file:
+          type: string
+          format: binary
+          description: Optional JSON or JSONL file containing up to 1,000 messages. Use this field instead of messages.
+        preserveOrder:
+          type: boolean
+          default: true
+          description: Whether the service should preserve input order.
+      oneOf:
+      - required:
+        - messages
+      - required:
+        - file
+      additionalProperties: false
+    AsyncBatchPublishMultipartRequest:
+      type: object
+      description: Multipart form. Supply exactly one of messages or file. The file field is optional when messages
+        is supplied.
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/PublishRequest'
+          description: Optional JSON array of messages. Use this field instead of file when not uploading a file.
+        file:
+          type: string
+          format: binary
+          description: Optional JSON or JSONL file containing the messages to process asynchronously. Use this field
+            instead of messages.
+        preserveOrder:
+          type: boolean
+          default: true
+          description: Whether the service should preserve input order.
+      oneOf:
+      - required:
+        - messages
+      - required:
+        - file
+      additionalProperties: false
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: BADREQUEST
+            message: Invalid request.
+    Unauthorized:
+      description: Authentication is required or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Authentication is required or invalid.
+    Forbidden:
+      description: The application is not authorized for this operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: FORBIDDEN
+            message: The application is not authorized for this operation.
+    NotFound:
+      description: The requested resource was not found or is not visible to this application.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOTFOUND
+            message: The requested resource was not found or is not visible to this application.
+    Conflict:
+      description: The request conflicts with the current resource state or an idempotency constraint.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: CONFLICT
+            message: The request conflicts with the current resource state or an idempotency constraint.
+    TooManyRequests:
+      description: Rate limit exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: TOOMANYREQUESTS
+            message: Rate limit exceeded.
+    ServerError:
+      description: Unexpected platform error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: SERVERERROR
+            message: Unexpected platform error.
+    CursorExpired:
+      description: The supplied event cursor is no longer available. Use an approved replay or reconciliation flow.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: CURSOREXPIRED
+            message: The supplied event cursor is no longer available. Use an approved replay or reconciliation
+              flow.
+    PayloadTooLarge:
+      description: Request or uploaded file exceeds the configured size limit.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: PAYLOAD_TOO_LARGE
+            message: The request exceeds the configured size limit.
+            retryable: false
+    UnsupportedMediaType:
+      description: The request media type or file format is not supported.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNSUPPORTED_MEDIA_TYPE
+            message: The supplied media type or file format is not supported.
+            retryable: false
+    UnprocessableEntity:
+      description: The request is syntactically valid but fails semantic validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_FAILED
+            message: One or more fields or records failed validation.
+            retryable: false
+    ServiceUnavailable:
+      description: The service or a required dependency is temporarily unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: SERVICE_UNAVAILABLE
+            message: The service is temporarily unavailable.
+            retryable: true
+x-client-api-guidance:
+  modeCapabilities:
+    CORE:
+      publish: true
+      batchPublish: true
+      requestReply: true
+      pushSubscription: true
+      pull: false
+      acknowledgement: false
+      replay: false
+      deadLetter: false
+      durableCursor: false
+    JETSTREAM:
+      publish: true
+      batchPublish: true
+      requestReply: Only if explicitly enabled as transient request/reply
+      pushSubscription: true
+      pull: true
+      acknowledgement: true
+      replay: true
+      deadLetter: Policy-dependent
+      durableCursor: true
+  runtimeRules:
+  - Client APIs use logical destinations only; internal routing identifiers are not accepted.
+  - Consumer create/update/delete and destination/stream provisioning are Admin API responsibilities.
+  - A subscription is a runtime handle, not a consumer. Closing it must not delete or reset the managed consumer.
+  - Replay must use an isolated replay cursor and must not rewind the live durable consumer.
+  - A timeout or lost HTTP response after publish can leave the outcome unknown; use Idempotency-Key and query operation/status
+    where available.
+  - Delivery is at-least-once where JetStream redelivery applies; client processing must be idempotent.
+  - SSE reconnection is transport recovery, not a substitute for JetStream ACK settlement.
+  - CORE is transient and may lose messages during disconnects; no ACK, pull, replay or DLQ semantics.
+  errorHandling:
+    '400': Malformed request, invalid field combination or unsupported mode/capability.
+    '401': Missing/expired/invalid bearer token.
+    '403': Application is authenticated but not authorized for the destination, consumer or operation.
+    '404': Destination, consumer, subscription, operation or message is not visible/found.
+    '409': State conflict, stale delivery handle, duplicate idempotency key with different request, or invalid lifecycle
+      transition.
+    '410': Subscription or SSE cursor expired/evicted and cannot be resumed.
+    '429': Rate/concurrency/quota limit exceeded; honor Retry-After.
+    '500': Unexpected platform failure; retry only with idempotency safeguards.
+    '502': Upstream messaging dependency failure; outcome may be indeterminate for publish operations.
+    '503': Platform temporarily unavailable or not ready; honor Retry-After.
+    '504': Request/reply or bounded operation timed out.
+    '413': Request or upload exceeds configured size limit.
+    '415': Unsupported request content type or bulk file format.
+    '422': Syntactically valid request or file contains semantic validation errors.
+  validationRules:
+  - clientRequestId is mandatory for batch and bulk records and must be unique within a submitted batch/file.
+  - messageId is stable across retries; duplicate message IDs with identical content follow the configured deduplication
+    policy; conflicting content returns 409.
+  - Payload must be valid base64 and must not exceed the effective destination payload limit after decoding.
+  - contentType must be a valid media type; headers must not override reserved transport/security headers.
+  - CORE cannot use pull, ACK/NAK/IN_PROGRESS/TERM, durable replay or JetStream DLQ operations.
+  - JETSTREAM pull requires an ACTIVE PULL subscription; SSE requires an ACTIVE PUSH subscription.
+  - Replay time ranges require startAt when startPosition is TIMESTAMP; endAt must be later than startAt and cannot
+    exceed retention.
+  - NAK accepts delayMs only; IN_PROGRESS accepts extendMs only; ACK and TERM do not accept delayMs or extendMs.
+  - Every batch/async/bulk operation produces exactly one terminal result per input record, including validation
+    failures and skipped records.
+  - Pagination tokens are opaque, scoped to the authenticated application and query filters, and expire according
+    to platform policy.
+  batchPublishing:
+    asyncSubmission: POST /api/v1/messages/batch-async accepts JSON, NDJSON, or multipart JSON/JSONL file; returns
+      an operationId for status and paginated results.
+    fileLimits: Maximum request size, file size, decoded payload size, record count and concurrency are enforced
+      by platform policy. The API returns a validation error when a limit is exceeded.
+    clientBehavior: For large files, stream the request body or multipart file rather than loading the entire file
+      into memory. Use JSONL for efficient record-by-record processing. Preserve stable per-record identifiers across
+      retries.
+    syncMaximumItemsPerRequest: 1000
+    syncSubmission: POST /api/v1/messages/batch accepts JSON, NDJSON, or multipart JSON/JSONL file; returns per-record
+      outcomes synchronously.
+    largeFileHandling: The SDK streams file content. Internal staging or object storage is not exposed as a client
+      API.
