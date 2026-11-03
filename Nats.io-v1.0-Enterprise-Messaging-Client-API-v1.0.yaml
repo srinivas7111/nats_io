@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
-  title: Enterprise Messaging Multi-Application Client API
-  version: 1.4.2
+  title: Nats.io :: Enterprise Messaging Multi-Application Client API
+  version: 1.0
   description: 'Comprehensive client-facing messaging API for multiple applications sharing a managed NATS platform.
     Covers Core NATS and JetStream application messaging operations. The platform owns NATS connections, streams,
     consumers, topology, stream configuration, retention, replication and security policies. Clients use logical
