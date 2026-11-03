@@ -1,0 +1,2052 @@
+openapi: 3.0.3
+info:
+  title: Enterprise Messaging Multi-Application Client API
+  version: 1.4.2
+  description: 'Comprehensive client-facing messaging API for multiple applications sharing a managed NATS platform.
+    Covers Core NATS and JetStream application messaging operations. The platform owns NATS connections, streams,
+    consumers, topology, stream configuration, retention, replication and security policies. Clients use logical
+    destinations and application subscription handles.
+
+
+    Optional NATS JetStream Key-Value (KV) and Object Store capabilities are out of scope for this iteration and
+    will be evaluated and addressed in a subsequent iteration.'
+servers:
+- url: https://messaging.example.com
+  description: API host; versioned API paths begin with /api/v1
+security:
+- BearerAuth: []
+tags:
+- name: Messages
+- name: Destinations
+  description: Register and discover application-approved logical messaging destinations.
+- name: Subscriptions
+- name: Acknowledgements
+- name: Request-Reply
+- name: Replay and Reprocessing
+- name: Operations
+- name: Health
+- name: Dead-Letter Handling
+  description: Inspect messages routed to configured dead-letter handling.
+x-sdk-runtime-guidance:
+  authentication:
+    scheme: Bearer JWT using the configured OAuth2/OIDC identity provider.
+    tokenLifecycle: The SDK must accept a pluggable token provider that obtains, caches and refreshes access tokens
+      before expiry. The HTTP interceptor must attach the current access token to each request and refresh/retry
+      once on an eligible authentication-expiry response.
+    refreshOwnership: Token refresh, client credential rotation and refresh-token handling belong to the identity
+      provider/token provider integration; this messaging API does not expose a token refresh endpoint. Never embed
+      client secrets or refresh tokens in application source code.
+  serverSentEvents:
+    reconnectHeader: Last-Event-ID
+    behavior: The SDK reconnects with the last completely processed SSE event ID. It must persist the cursor only
+      after application processing succeeds, use bounded exponential backoff with jitter, and prevent duplicate
+      side effects through idempotent processing.
+    cursorRecovery: If the server reports that the cursor has expired or is unavailable, surface a recoverable cursor
+      error and use an application-approved replay/reconciliation flow; do not silently restart from the newest
+      event.
+  batchPublishing:
+    maximumItemsPerRequest: 500
+    clientBehavior: Automatically chunk batches larger than 500 into requests of at most 500 messages. Preserve
+      original message ordering where requested, correlate each result to its input message, and report partial
+      failures without treating the entire logical batch as atomic.
+    retries: Retry only failed or indeterminate entries where possible, using stable Idempotency-Key values to reduce
+      duplicate publication risk.
+paths:
+  /api/v1/messages:
+    post:
+      tags:
+      - Messages
+      summary: Publish a message
+      description: Publishes a message to a platform-configured logical destination. The platform resolves the underlying
+        subject and persistence resources.
+      operationId: publishMessage
+      responses:
+        '202':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishedMessage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Message'
+            examples:
+              paymentCreated:
+                summary: Publish a payment-created event
+                value: &id001
+                  messagingMode: JETSTREAM
+                  streamName: PAYMENTS_FACTORY_STREAM
+                  destination: payment.events
+                  key: PAY-2026-000184
+                  payload:
+                    eventId: evt-7f3a9c21
+                    eventType: PAYMENT_CREATED
+                    eventVersion: '1.0'
+                    occurredAt: '2026-11-03T08:30:15Z'
+                    payment:
+                      paymentId: PAY-2026-000184
+                      customerId: CUST-100245
+                      amount: 2499.5
+                      currency: INR
+                      status: CREATED
+                      paymentMethod: UPI
+                  contentType: application/json
+                  headers: &id002
+                    x-correlation-id: corr-20261103-000184
+                    x-source-system: payments-api
+                    x-tenant-id: tenant-india-01
+                  schemaVersion: '1.0'
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - &id003
+        $ref: '#/components/parameters/cid'
+      - &id004
+        $ref: '#/components/parameters/ikey'
+  /api/v1/messages/batch:
+    post:
+      tags:
+      - Messages
+      summary: Publish a batch of messages
+      description: Publishes multiple messages and returns an outcome for each entry. A single request accepts at
+        most 500 messages. SDKs must automatically split larger application batches into sequential or bounded-concurrency
+        chunks of no more than 500 messages, preserve per-message outcomes, and avoid retrying successful entries
+        unless the same idempotency keys are reused.
+      operationId: publishMessageBatch
+      responses:
+        '200':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchPublishResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchPublishRequest'
+            examples:
+              paymentEvents:
+                summary: Publish two payment events
+                value:
+                  messages:
+                  - *id001
+                  - messagingMode: JETSTREAM
+                    streamName: PAYMENTS_FACTORY_STREAM
+                    destination: payment.events
+                    key: PAY-2026-000185
+                    payload:
+                      eventId: evt-2b6d8e40
+                      eventType: PAYMENT_CREATED
+                      eventVersion: '1.0'
+                      occurredAt: '2026-11-03T08:31:02Z'
+                      payment:
+                        paymentId: PAY-2026-000185
+                        customerId: CUST-100246
+                        amount: 1250.0
+                        currency: INR
+                        status: CREATED
+                        paymentMethod: CARD
+                    contentType: application/json
+                    headers: *id002
+                    schemaVersion: '1.0'
+                  atomic: false
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id003
+      - *id004
+  /api/v1/subscriptions:
+    post:
+      tags:
+      - Subscriptions
+      summary: Create a subscription
+      description: Creates an application subscription handle. It does not expose or provision a native NATS consumer.
+      operationId: createSubscription
+      responses:
+        '201':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionRequest'
+            examples:
+              paymentConsumer:
+                summary: Create a payment processor subscription
+                value: &id009
+                  messagingMode: JETSTREAM
+                  streamName: PAYMENTS_FACTORY_STREAM
+                  destination: payment.events
+                  consumerGroup: payment-processor
+                  deliveryMode: PULL
+                  filter:
+                    eventType: PAYMENT_CREATED
+                  startPosition: NEW
+                  acknowledgementMode: EXPLICIT
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+    get:
+      tags:
+      - Subscriptions
+      summary: List subscriptions
+      description: Lists subscriptions visible to the authenticated application.
+      operationId: listSubscriptions
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - name: destination
+        in: query
+        schema:
+          type: string
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - CLOSED
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - name: pageToken
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Subscription list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subscription'
+                  nextPageToken:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}:
+    get:
+      tags:
+      - Subscriptions
+      summary: Get a subscription
+      description: Returns the current state of a subscription.
+      operationId: getSubscription
+      responses:
+        '200':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - &id005
+        $ref: '#/components/parameters/sid'
+    delete:
+      tags:
+      - Subscriptions
+      summary: Close a subscription
+      description: Closes the application subscription handle. The platform manages underlying consumer lifecycle.
+      operationId: closeSubscription
+      responses:
+        '204':
+          description: Successful operation.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+  /api/v1/subscriptions/{subscriptionId}/messages:
+    get:
+      tags:
+      - Subscriptions
+      summary: Receive messages
+      description: Retrieves messages from a pull-mode subscription. Messages require explicit acknowledgement.
+        Add waitMs for bounded long polling.
+      operationId: receiveMessages
+      responses:
+        '200':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageBatch'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - name: maxMessages
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 10
+      - name: waitMs
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 30000
+          default: 5000
+      - name: nextToken
+        in: query
+        schema:
+          type: string
+  /api/v1/subscriptions/{subscriptionId}/events:
+    get:
+      tags:
+      - Subscriptions
+      summary: Stream message events
+      description: Opens a Server-Sent Events connection for push-mode delivery. Each message event contains a DeliveredMessage.
+        Acknowledge using the acknowledgement endpoints. The server assigns a stable event ID to each delivered
+        event and sends it in the SSE id field. After a disconnect, reconnect with the Last-Event-ID header set
+        to the last completely processed event ID to resume delivery. The SDK should persist the last processed
+        event ID only after the application has safely handled the event. If the cursor is no longer available,
+        the server returns the documented cursor-expired error and the SDK must follow the configured recovery policy.
+      operationId: streamSubscriptionEvents
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - name: Last-Event-ID
+        in: header
+        description: Optional SSE resume cursor. Send the id value from the last completely processed event when
+          reconnecting after a network interruption.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: SSE event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: 'SSE frames include id: <event-id>, event: message and data: <JSON payload>. The id
+                  is supplied as Last-Event-ID on reconnect.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/subscriptions/{subscriptionId}/messages/{messageId}/acknowledgements:
+    post:
+      tags:
+      - Acknowledgements
+      summary: Acknowledge a message
+      description: Confirms successful processing. Repeated acknowledgement of an already settled delivery is treated
+        idempotently.
+      operationId: acknowledgeMessage
+      responses:
+        '200':
+          description: Successful operation.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AckRequest'
+            examples:
+              successfulProcessing:
+                summary: Acknowledge successfully processed payment
+                value: &id011
+                  metadata:
+                    processedBy: payment-processor
+                    processingResult: SUCCESS
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - &id006
+        $ref: '#/components/parameters/mid'
+  /api/v1/subscriptions/{subscriptionId}/messages/{messageId}/negative-acknowledgements:
+    post:
+      tags:
+      - Acknowledgements
+      summary: Reject a message for redelivery
+      description: Requests redelivery according to platform retry policy. delaySeconds is advisory and subject
+        to policy.
+      operationId: negativeAcknowledgeMessage
+      responses:
+        '200':
+          description: Successful operation.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NakRequest'
+            examples:
+              temporaryFailure:
+                summary: Retry after a temporary downstream failure
+                value: &id012
+                  delaySeconds: 30
+                  reason: Temporary downstream payment ledger unavailability.
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - *id006
+  /api/v1/subscriptions/{subscriptionId}/messages/{messageId}/processing-extensions:
+    post:
+      tags:
+      - Acknowledgements
+      summary: Extend message processing time
+      description: Indicates processing is ongoing and requests an acknowledgement deadline extension, subject to
+        platform policy.
+      operationId: extendMessageProcessing
+      responses:
+        '200':
+          description: Successful operation.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgressRequest'
+            examples:
+              longRunningProcessing:
+                summary: Extend processing while a payment is being reconciled
+                value: &id013
+                  extendSeconds: 60
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - *id006
+  /api/v1/subscriptions/{subscriptionId}/messages/{messageId}/terminations:
+    post:
+      tags:
+      - Acknowledgements
+      summary: Terminate message delivery
+      description: Marks this delivery as permanently failed. DLQ routing, if enabled, is controlled by platform
+        policy.
+      operationId: terminateMessageDelivery
+      responses:
+        '200':
+          description: Successful operation.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AckRequest'
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - *id006
+  /api/v1/requests:
+    post:
+      tags:
+      - Request-Reply
+      summary: Send a request and await a reply
+      description: Sends a request to a logical destination and waits for a correlated response. Reply routing and
+        temporary messaging resources are managed by the platform.
+      operationId: sendRequest
+      responses:
+        '200':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestReplyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestReplyRequest'
+            examples:
+              paymentStatusRequest:
+                summary: Request the current payment status
+                value:
+                  messagingMode: CORE
+                  destination: payment.status.get
+                  payload:
+                    paymentId: PAY-2026-000184
+                    requestedBy: reconciliation-service
+                  contentType: application/json
+                  timeoutMs: 5000
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id003
+      - *id004
+  /api/v1/subscriptions/{subscriptionId}/replays:
+    post:
+      tags:
+      - Replay and Reprocessing
+      summary: Start a message replay
+      description: Requests replay from an approved logical position. Retention, authorization and replay limits
+        are validated by the platform; native sequence numbers are not exposed.
+      operationId: startReplay
+      responses:
+        '202':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayRequest'
+            examples:
+              dailyReconciliation:
+                summary: Replay payment events for a date range
+                value: &id014
+                  messagingMode: JETSTREAM
+                  streamName: PAYMENTS_FACTORY_STREAM
+                  destination: payment.events
+                  consumerGroup: payment-reconciliation
+                  startPosition: TIMESTAMP
+                  startAt: '2026-11-01T00:00:00Z'
+                  endAt: '2026-11-02T00:00:00Z'
+                  reason: Reconcile payment events for the previous business day.
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id005
+      - *id004
+  /api/v1/messages/reprocess:
+    post:
+      tags:
+      - Replay and Reprocessing
+      summary: Reprocess selected messages
+      description: Requests controlled reprocessing of previously delivered messages by platform message identifiers.
+      operationId: reprocessMessages
+      responses:
+        '202':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReprocessRequest'
+            examples:
+              reprocessPaymentMessages:
+                summary: Reprocess selected payment events
+                value: &id015
+                  messagingMode: JETSTREAM
+                  streamName: PAYMENTS_FACTORY_STREAM
+                  destination: payment.events
+                  messageIds:
+                  - msg-01JBF8KQ7M4T2X9A
+                  - msg-01JBF8M2Z8Q6W4P1
+                  targetDestination: payment.events.reprocessed
+                  reason: Reprocess payment events after correcting the downstream validation rule.
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - *id004
+  /api/v1/operations/{operationId}:
+    get:
+      tags:
+      - Operations
+      summary: Get operation status
+      description: Returns the state and result summary for an asynchronous batch, replay or reprocessing operation.
+      operationId: getOperation
+      responses:
+        '200':
+          description: Successful operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - name: operationId
+        in: path
+        required: true
+        schema:
+          type: string
+  /api/v1/health/live:
+    get:
+      tags:
+      - Health
+      summary: Check API liveness
+      description: Indicates whether the API process is running; it does not guarantee messaging dependency readiness.
+      operationId: getLiveness
+      security: []
+      responses:
+        '200':
+          description: API process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /api/v1/health/ready:
+    get:
+      tags:
+      - Health
+      summary: Check API readiness
+      description: Indicates whether the API can accept client messaging operations.
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: API is ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: API is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /api/v1/destinations:
+    post:
+      tags:
+      - Destinations
+      summary: Request a new destination
+      description: Requests registration of a logical destination for the authenticated application. The platform
+        validates naming, ownership, authorization and messaging-mode requirements. For CORE, it authorizes the
+        logical subject for permitted operations. For JETSTREAM, it verifies that the destination can be mapped
+        to an existing application-approved stream; if platform provisioning is required, the request is routed
+        for approval. This operation does not create or modify NATS streams or expose native NATS administration.
+      operationId: requestDestinationRegistration
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - $ref: '#/components/parameters/ikey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DestinationRegistrationRequest'
+            examples:
+              core:
+                summary: Register a Core NATS destination
+                value:
+                  messagingMode: CORE
+                  destination: payment.status.updated
+                  description: Payment status updates
+                  purpose: Publish payment status changes
+                  requestedAccess:
+                  - PUBLISH
+                  - SUBSCRIBE
+              jetstream:
+                summary: Register a JetStream destination against an existing stream
+                value:
+                  messagingMode: JETSTREAM
+                  destination: payment.refund.created
+                  streamName: PAYMENTS_FACTORY_STREAM
+                  description: Refund-created events
+                  purpose: Publish and consume refund events
+                  requestedAccess:
+                  - PUBLISH
+                  - SUBSCRIBE
+      responses:
+        '202':
+          description: Registration request accepted for validation or platform provisioning.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              examples:
+                accepted:
+                  value:
+                    operationId: op_01JDEST123
+                    type: DESTINATION_REGISTRATION
+                    status: ACCEPTED
+                    submittedAt: '2026-11-03T09:00:00+05:30'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    get:
+      tags:
+      - Destinations
+      summary: List application destinations
+      description: Lists logical destinations registered for the authenticated application.
+      operationId: listDestinations
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - name: messagingMode
+        in: query
+        schema:
+          $ref: '#/components/schemas/MessagingMode'
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - PENDING
+          - ACTIVE
+          - REJECTED
+          - SUSPENDED
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - name: pageToken
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Registered destinations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DestinationList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/destinations/{destination}:
+    get:
+      tags:
+      - Destinations
+      summary: Get destination details
+      description: Returns registration status and granted application permissions for a logical destination.
+      operationId: getDestination
+      parameters:
+      - $ref: '#/components/parameters/ApplicationId'
+      - name: destination
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Destination details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Destination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}/pause:
+    post:
+      tags:
+      - Subscriptions
+      summary: Pause message delivery
+      description: Pauses delivery to this logical application subscription. It does not delete the subscription
+        or alter the underlying platform-managed consumer configuration.
+      operationId: pauseSubscription
+      parameters:
+      - &id007
+        $ref: '#/components/parameters/ApplicationId'
+      - &id008
+        $ref: '#/components/parameters/sid'
+      responses:
+        '200':
+          description: Subscription paused.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}/resume:
+    post:
+      tags:
+      - Subscriptions
+      summary: Resume message delivery
+      description: Resumes delivery to a paused logical application subscription.
+      operationId: resumeSubscription
+      parameters:
+      - *id007
+      - *id008
+      responses:
+        '200':
+          description: Subscription resumed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}/metrics:
+    get:
+      tags:
+      - Subscriptions
+      summary: Get subscription processing metrics
+      description: Returns application-level delivery and acknowledgement metrics. Native consumer configuration
+        and server internals are not exposed.
+      operationId: getSubscriptionMetrics
+      parameters:
+      - *id007
+      - *id008
+      responses:
+        '200':
+          description: Subscription metrics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionMetrics'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/subscriptions/{subscriptionId}/dead-letter-messages:
+    get:
+      tags:
+      - Dead-Letter Handling
+      summary: List dead-letter messages
+      description: Lists messages routed to the application's configured dead-letter destination after policy-defined
+        delivery failures. This endpoint is available only when DLQ handling is enabled for the application.
+      operationId: listDeadLetterMessages
+      parameters:
+      - *id007
+      - *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - name: pageToken
+        in: query
+        schema:
+          type: string
+          example: eyJvZmZzZXQiOjUwfQ
+      responses:
+        '200':
+          description: Dead-letter messages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeadLetterMessageList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    sid:
+      name: subscriptionId
+      in: path
+      required: true
+      schema:
+        type: string
+    mid:
+      name: messageId
+      in: path
+      required: true
+      schema:
+        type: string
+    cid:
+      name: X-Correlation-Id
+      in: header
+      schema:
+        type: string
+    ikey:
+      name: Idempotency-Key
+      in: header
+      schema:
+        type: string
+    ApplicationId:
+      name: X-Application-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: ^[a-z][a-z0-9_]{2,62}$
+        maxLength: 63
+      description: Registered application identifier, for example payments_factory. Must match the authenticated
+        application's authorized identity.
+  schemas:
+    Error:
+      type: object
+      required:
+      - code
+      - message
+      - retryable
+      properties:
+        code:
+          type: string
+          example: DESTINATION_NOT_FOUND
+        message:
+          type: string
+        retryable:
+          type: boolean
+        correlationId:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+      example:
+        code: DESTINATION_NOT_AUTHORIZED
+        message: Application payments_factory is not authorized to publish to payment.events.
+        retryable: false
+        correlationId: corr-20261103-000184
+        details:
+          applicationId: payments_factory
+          destination: payment.events
+          requiredPermission: PUBLISH
+    Message:
+      type: object
+      required:
+      - messagingMode
+      - destination
+      - payload
+      properties:
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        streamName:
+          type: string
+          pattern: ^[A-Z][A-Z0-9_]{1,127}$
+          description: Required for JETSTREAM when the platform contract requires an explicit stream reference.
+            Must be provisioned and allow-listed for the authenticated application. Must be omitted for CORE.
+          example: PAYMENTS_FACTORY_STREAM
+        destination:
+          type: string
+          example: payment.events
+          description: Platform-approved logical destination, not a NATS subject.
+        key:
+          type: string
+          description: Optional business key used for message grouping, partitioning or ordering where supported.
+          example: PAY-2026-000184
+        payload:
+          type: object
+          description: Business event payload. Supply a JSON object matching the agreed application event schema.
+          additionalProperties: true
+          example:
+            eventId: evt-7f3a9c21
+            eventType: PAYMENT_CREATED
+            eventVersion: '1.0'
+            occurredAt: '2026-11-03T08:30:15Z'
+            payment:
+              paymentId: PAY-2026-000184
+              customerId: CUST-100245
+              amount: 2499.5
+              currency: INR
+              status: CREATED
+              paymentMethod: UPI
+        contentType:
+          type: string
+          default: application/json
+          example: application/json
+        headers:
+          type: object
+          description: Optional application-defined metadata headers. Use concrete string values; do not place business
+            payload fields here.
+          additionalProperties:
+            type: string
+          example:
+            x-correlation-id: corr-20261103-000184
+            x-source-system: payments-api
+            x-tenant-id: tenant-india-01
+        schemaVersion:
+          type: string
+          example: '1.0'
+      description: Message envelope. payload is a JSON object, not a JSON-encoded string. messagingMode is required.
+        streamName is applicable only to JETSTREAM; the platform validates that it belongs to the authenticated
+        application.
+      example: *id001
+    PublishedMessage:
+      type: object
+      required:
+      - messageId
+      - destination
+      - publishedAt
+      properties:
+        messageId:
+          type: string
+        destination:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        correlationId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+      example:
+        messageId: msg-01JBF8KQ7M4T2X9A
+        destination: payment.events
+        publishedAt: '2026-11-03T08:30:16Z'
+        correlationId: corr-20261103-000184
+        status: ACCEPTED
+    BatchPublishRequest:
+      type: object
+      required:
+      - messages
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/Message'
+        atomic:
+          type: boolean
+          default: false
+      example:
+        messages:
+        - messagingMode: JETSTREAM
+          streamName: PAYMENTS_FACTORY_STREAM
+          destination: payment.events
+          key: PAY-2026-000184
+          payload:
+            eventId: evt-7f3a9c21
+            eventType: PAYMENT_CREATED
+            eventVersion: '1.0'
+            occurredAt: '2026-11-03T08:30:15Z'
+            payment:
+              paymentId: PAY-2026-000184
+              customerId: CUST-100245
+              amount: 2499.5
+              currency: INR
+              status: CREATED
+              paymentMethod: UPI
+          contentType: application/json
+          headers:
+            x-correlation-id: corr-20261103-000184
+            x-source-system: payments-api
+            x-tenant-id: tenant-india-01
+          schemaVersion: '1.0'
+        - messagingMode: JETSTREAM
+          streamName: PAYMENTS_FACTORY_STREAM
+          destination: payment.events
+          key: PAY-2026-000185
+          payload:
+            eventId: evt-2b6d8e40
+            eventType: PAYMENT_CREATED
+            eventVersion: '1.0'
+            occurredAt: '2026-11-03T08:31:02Z'
+            payment:
+              paymentId: PAY-2026-000185
+              customerId: CUST-100246
+              amount: 1250.0
+              currency: INR
+              status: CREATED
+              paymentMethod: CARD
+          contentType: application/json
+          headers:
+            x-correlation-id: corr-20261103-000185
+            x-source-system: payments-api
+            x-tenant-id: tenant-india-01
+          schemaVersion: '1.0'
+        atomic: false
+    BatchPublishResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              status:
+                type: string
+                enum:
+                - ACCEPTED
+                - REJECTED
+              message:
+                $ref: '#/components/schemas/PublishedMessage'
+              error:
+                $ref: '#/components/schemas/Error'
+        acceptedCount:
+          type: integer
+        rejectedCount:
+          type: integer
+    SubscriptionRequest:
+      type: object
+      required:
+      - messagingMode
+      - destination
+      - consumerGroup
+      properties:
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        streamName:
+          type: string
+          pattern: ^[A-Z][A-Z0-9_]{1,127}$
+          description: JetStream stream assigned to the application; omit for CORE.
+          example: PAYMENTS_FACTORY_STREAM
+        destination:
+          type: string
+        consumerGroup:
+          type: string
+        deliveryMode:
+          type: string
+          enum:
+          - PULL
+          - PUSH
+          default: PULL
+        filter:
+          type: object
+          additionalProperties:
+            type: string
+        startPosition:
+          type: string
+          enum:
+          - NEW
+          - EARLIEST
+          - LATEST
+          - TIMESTAMP
+          default: NEW
+        startAt:
+          type: string
+          format: date-time
+        acknowledgementMode:
+          type: string
+          enum:
+          - EXPLICIT
+          default: EXPLICIT
+      description: Creates a logical application subscription. For JETSTREAM, streamName must refer to an application-owned,
+        platform-provisioned stream. For CORE, omit streamName.
+      example: *id009
+    Subscription:
+      type: object
+      required:
+      - subscriptionId
+      - destination
+      - consumerGroup
+      - status
+      properties:
+        applicationId:
+          type: string
+          example: payments_factory
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        streamName:
+          type: string
+          example: PAYMENTS_FACTORY_STREAM
+        subscriptionId:
+          type: string
+        destination:
+          type: string
+        consumerGroup:
+          type: string
+        deliveryMode:
+          type: string
+          enum:
+          - PULL
+          - PUSH
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - CLOSED
+        createdAt:
+          type: string
+          format: date-time
+      example:
+        applicationId: payments_factory
+        messagingMode: JETSTREAM
+        streamName: PAYMENTS_FACTORY_STREAM
+        subscriptionId: sub-01JBF7V9Q4R6C2M8
+        destination: payment.events
+        consumerGroup: payment-processor
+        deliveryMode: PULL
+        status: ACTIVE
+        createdAt: '2026-11-03T08:00:00Z'
+    DeliveredMessage:
+      type: object
+      required:
+      - messageId
+      - destination
+      - payload
+      - delivery
+      properties:
+        applicationId:
+          type: string
+          example: payments_factory
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        streamName:
+          type: string
+          description: Present for JetStream deliveries; omitted for Core NATS.
+        messageId:
+          type: string
+        destination:
+          type: string
+        payload: {}
+        contentType:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        correlationId:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        delivery:
+          type: object
+          properties:
+            attempt:
+              type: integer
+            deliveredAt:
+              type: string
+              format: date-time
+            acknowledgementDeadline:
+              type: string
+              format: date-time
+      example: &id010
+        applicationId: payments_factory
+        messagingMode: JETSTREAM
+        streamName: PAYMENTS_FACTORY_STREAM
+        messageId: msg-01JBF8KQ7M4T2X9A
+        destination: payment.events
+        payload:
+          eventId: evt-7f3a9c21
+          eventType: PAYMENT_CREATED
+          payment:
+            paymentId: PAY-2026-000184
+            customerId: CUST-100245
+            amount: 2499.5
+            currency: INR
+            status: CREATED
+            paymentMethod: UPI
+        contentType: application/json
+        headers:
+          x-correlation-id: corr-20261103-000184
+          x-source-system: payments-api
+        correlationId: corr-20261103-000184
+        publishedAt: '2026-11-03T08:30:15Z'
+        delivery:
+          attempt: 1
+          deliveredAt: '2026-11-03T08:30:16Z'
+          acknowledgementDeadline: '2026-11-03T08:31:16Z'
+    MessageBatch:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveredMessage'
+        nextToken:
+          type: string
+      example:
+        messages:
+        - *id010
+        nextToken: eyJvZmZzZXQiOjEwfQ
+    AckRequest:
+      type: object
+      properties:
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+      example: *id011
+    NakRequest:
+      type: object
+      properties:
+        delaySeconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+        reason:
+          type: string
+          maxLength: 512
+      example: *id012
+    ProgressRequest:
+      type: object
+      properties:
+        extendSeconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+      example: *id013
+    RequestReplyRequest:
+      type: object
+      required:
+      - messagingMode
+      - destination
+      - payload
+      - timeoutMs
+      properties:
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        destination:
+          type: string
+        payload:
+          example:
+            paymentId: PAY-2026-000184
+            requestedBy: reconciliation-service
+        contentType:
+          type: string
+          default: application/json
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        timeoutMs:
+          type: integer
+          minimum: 1
+          maximum: 120000
+          example: 5000
+      example:
+        messagingMode: CORE
+        destination: payment.status.get
+        payload:
+          paymentId: PAY-2026-000184
+          requestedBy: reconciliation-service
+        contentType: application/json
+        headers:
+          x-correlation-id: corr-20261103-000184
+        timeoutMs: 5000
+    RequestReplyResponse:
+      type: object
+      required:
+      - requestId
+      - status
+      properties:
+        requestId:
+          type: string
+        status:
+          type: string
+          enum:
+          - RESPONDED
+          - TIMED_OUT
+        response:
+          example:
+            paymentId: PAY-2026-000184
+            status: SUCCESS
+            updatedAt: '2026-11-03T08:30:20Z'
+        contentType:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        respondedAt:
+          type: string
+          format: date-time
+    ReplayRequest:
+      type: object
+      required:
+      - messagingMode
+      - streamName
+      - destination
+      - consumerGroup
+      - startPosition
+      properties:
+        messagingMode:
+          type: string
+          enum:
+          - JETSTREAM
+          description: Replay is supported only for JetStream.
+        streamName:
+          type: string
+          example: PAYMENTS_FACTORY_STREAM
+        destination:
+          type: string
+        consumerGroup:
+          type: string
+        startPosition:
+          type: string
+          enum:
+          - EARLIEST
+          - TIMESTAMP
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          maxLength: 512
+      example: *id014
+    ReprocessRequest:
+      type: object
+      required:
+      - messagingMode
+      - streamName
+      - destination
+      - messageIds
+      properties:
+        messagingMode:
+          type: string
+          enum:
+          - JETSTREAM
+          description: Reprocessing by stored message identity is supported only for JetStream.
+        streamName:
+          type: string
+          example: PAYMENTS_FACTORY_STREAM
+        destination:
+          type: string
+        messageIds:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: string
+        targetDestination:
+          type: string
+        reason:
+          type: string
+          maxLength: 512
+      example: *id015
+    Operation:
+      type: object
+      required:
+      - operationId
+      - type
+      - status
+      properties:
+        operationId:
+          type: string
+        type:
+          type: string
+          enum:
+          - REPLAY
+          - REPROCESS
+          - BATCH_PUBLISH
+          - DESTINATION_REGISTRATION
+        status:
+          type: string
+          enum:
+          - ACCEPTED
+          - RUNNING
+          - SUCCEEDED
+          - PARTIALLY_SUCCEEDED
+          - FAILED
+        submittedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        result:
+          type: object
+          additionalProperties: true
+      example:
+        operationId: op-01JBF9A3Q5M7N2T8
+        type: REPROCESS
+        status: RUNNING
+        submittedAt: '2026-11-03T09:00:00Z'
+    Health:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - UP
+          - DOWN
+          - DEGRADED
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+    MessagingMode:
+      type: string
+      enum:
+      - CORE
+      - JETSTREAM
+      description: CORE provides transient publish/subscribe semantics. JETSTREAM provides persisted messaging and
+        acknowledgement/replay capabilities.
+    DestinationRegistrationRequest:
+      type: object
+      required:
+      - messagingMode
+      - destination
+      properties:
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        destination:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+          description: Application-facing logical destination name. The platform maps this to an authorized NATS
+            subject.
+          example: payment.refund.created
+        streamName:
+          type: string
+          pattern: ^[A-Z][A-Z0-9_]{1,127}$
+          description: Optional for JETSTREAM when the application is allowed to select among its pre-provisioned
+            streams. Must be omitted for CORE. This field never creates a stream.
+          example: PAYMENTS_FACTORY_STREAM
+        description:
+          type: string
+          maxLength: 512
+          example: Events emitted when a payment refund is created.
+        purpose:
+          type: string
+          maxLength: 256
+          example: Payment refund event publishing
+        requestedAccess:
+          type: array
+          uniqueItems: true
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - PUBLISH
+            - SUBSCRIBE
+          description: Requested application permissions for this destination.
+      description: Requests registration of a logical destination. The platform validates and provisions the authorization/mapping;
+        it does not create a native NATS subject.
+      example:
+        messagingMode: JETSTREAM
+        destination: payment.refund.created
+        streamName: PAYMENTS_FACTORY_STREAM
+        description: Events emitted when a payment refund is created.
+        purpose: Publish and consume refund-created events.
+        requestedAccess:
+        - PUBLISH
+        - SUBSCRIBE
+    Destination:
+      type: object
+      required:
+      - destination
+      - messagingMode
+      - status
+      properties:
+        destination:
+          type: string
+          example: payment.refund.created
+        messagingMode:
+          $ref: '#/components/schemas/MessagingMode'
+        streamName:
+          type: string
+          example: PAYMENTS_FACTORY_STREAM
+        status:
+          type: string
+          enum:
+          - PENDING
+          - ACTIVE
+          - REJECTED
+          - SUSPENDED
+        grantedAccess:
+          type: array
+          items:
+            type: string
+            enum:
+            - PUBLISH
+            - SUBSCRIBE
+        createdAt:
+          type: string
+          format: date-time
+        operationId:
+          type: string
+      example:
+        destination: payment.events
+        messagingMode: JETSTREAM
+        streamName: PAYMENTS_FACTORY_STREAM
+        status: ACTIVE
+        grantedAccess:
+        - PUBLISH
+        - SUBSCRIBE
+        createdAt: '2026-10-15T10:00:00Z'
+    DestinationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Destination'
+        nextPageToken:
+          type: string
+    SubscriptionMetrics:
+      type: object
+      required:
+      - subscriptionId
+      - status
+      properties:
+        subscriptionId:
+          type: string
+          example: sub-01JBF7V9Q4R6C2M8
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+          - CLOSED
+          example: ACTIVE
+        pendingMessages:
+          type: integer
+          example: 42
+          description: Messages awaiting delivery or acknowledgement, as reported by the platform.
+        ackPending:
+          type: integer
+          example: 3
+          description: Delivered messages awaiting acknowledgement.
+        redeliveredMessages:
+          type: integer
+          example: 2
+        lastDeliveredAt:
+          type: string
+          format: date-time
+          example: '2026-11-03T08:30:16Z'
+        lastAcknowledgedAt:
+          type: string
+          format: date-time
+          example: '2026-11-03T08:29:58Z'
+    DeadLetterMessage:
+      type: object
+      required:
+      - messageId
+      - originalDestination
+      - failedAt
+      - failureReason
+      properties:
+        messageId:
+          type: string
+          example: msg-01JBF8KQ7M4T2X9A
+        originalDestination:
+          type: string
+          example: payment.events
+        payload:
+          type: object
+          additionalProperties: true
+          example:
+            paymentId: PAY-2026-000184
+            amount: 2499.5
+            currency: INR
+            status: CREATED
+        failedAt:
+          type: string
+          format: date-time
+          example: '2026-11-03T08:45:00Z'
+        failureReason:
+          type: string
+          example: Maximum delivery attempts exceeded.
+        deliveryAttempts:
+          type: integer
+          example: 5
+        correlationId:
+          type: string
+          example: corr-20261103-000184
+      description: Platform-managed dead-letter entry. Availability depends on the application's configured DLQ
+        policy.
+    DeadLetterMessageList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeadLetterMessage'
+        nextPageToken:
+          type: string
+          example: eyJvZmZzZXQiOjIwfQ
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Not authorized.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Conflicting state.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Rate limit or quota exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: Unexpected platform error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+x-client-identity:
+  applicationHeader: X-Application-Id
+  identityRule: The header value must match an application identity authorized by the bearer token. The header is
+    a routing identifier, not an authentication mechanism.
+x-stream-naming-convention:
+  pattern: '{NORMALIZED_APPLICATION_ID}_STREAM'
+  normalization: Uppercase the registered application ID; replace non-alphanumeric runs with a single underscore;
+    trim leading/trailing underscores; append _STREAM.
+  example:
+    applicationId: payments_factory
+    streamName: PAYMENTS_FACTORY_STREAM
+  ownership: The platform provisions and owns streams. Clients may reference only streams assigned to their authenticated
+    application; they cannot create, update or delete streams.
+x-messaging-mode-rules:
+  CORE: No streamName. Transient messaging; no JetStream persistence, durable consumer, replay or JetStream acknowledgement
+    guarantees.
+  JETSTREAM: streamName is required for operations that address persisted messaging. The platform validates stream
+    ownership and maps logical destinations to configured subjects.
+  apiVersion: Version the HTTP contract in the URL path, e.g. /api/v1/messages. Do not send apiVersion as a repeated
+    request field.
+x-destination-governance:
+  clientModel: Clients request logical destination registration; they do not create native NATS subjects.
+  core: Platform validates the destination name and grants publish/subscribe permissions according to application
+    policy.
+  jetstream: Platform validates that the destination is mapped to an existing approved stream. Any stream configuration
+    change or new stream provisioning is an SRE/platform-admin operation.
+  security: Application identity from X-Application-Id must match the authenticated principal. A client cannot register
+    destinations for another application.
+  recommendation: Prefer pre-approved destinations for production. Allow self-service registration only through
+    platform policy, quotas, naming rules and audit logging.
+x-naming-conventions:
+  httpApi:
+    style: REST resource-oriented
+    rules:
+    - Use plural resource nouns, for example /messages, /subscriptions and /destinations.
+    - Use lowercase path segments; use kebab-case only for multiword resource names.
+    - Use HTTP methods to express standard CRUD actions; avoid Java-style paths such as /api/getMessage or /api/getMeggage.
+    - Every operation path must explicitly start with /api/v1/, for example /api/v1/messages. Keep the servers URL
+      at the host root to prevent duplicate version prefixes.
+  javaSdk:
+    style: Java lowerCamelCase
+    examples:
+      publishMessage: messagingClient.publishMessage(message)
+      receiveMessages: messagingClient.receiveMessages(subscriptionId, options)
+      getSubscription: messagingClient.getSubscription(subscriptionId)
+      requestReply: messagingClient.requestReply(request, PaymentStatus.class)
+    types: Java classes and interfaces use UpperCamelCase; constants use UPPER_SNAKE_CASE.
+x-java-sdk-method-mapping:
+- httpMethod: POST
+  path: /api/v1/messages
+  javaMethod: publishMessage
+- httpMethod: POST
+  path: /api/v1/messages/batch
+  javaMethod: publishMessages
+- httpMethod: POST
+  path: /api/v1/subscriptions
+  javaMethod: createSubscription
+- httpMethod: GET
+  path: /api/v1/subscriptions/{subscriptionId}/messages
+  javaMethod: receiveMessages
+- httpMethod: POST
+  path: /api/v1/requests
+  javaMethod: requestReply
+- httpMethod: POST
+  path: /api/v1/destinations
+  javaMethod: registerDestination
+x-client-api-coverage:
+  included:
+  - Core NATS publish and subscribe semantics
+  - JetStream publish acknowledgement and deduplication via Idempotency-Key
+  - Batch publish
+  - Pull consumption and SSE push delivery
+  - Explicit ACK, NAK with optional delay, in-progress extension and terminal failure
+  - Subscription create/list/get/close/pause/resume
+  - Subscription delivery and acknowledgement metrics
+  - Request-reply with timeout
+  - Replay from supported logical start positions
+  - Selected-message reprocessing
+  - Dead-letter inspection when DLQ policy is enabled
+  - Logical destination registration, discovery and authorization
+  - Asynchronous operation tracking and health endpoints
+  intentionally_not_client_exposed:
+  - Create/update/delete/list native streams and native consumers
+  - Stream retention, storage, replication, discard, max message and placement configuration
+  - Consumer configuration such as AckWait, MaxDeliver, durable name and delivery subject
+  - Cluster, account, connection, leaf-node, mirror/source and topology administration
+  - Stream purge, stream deletion and arbitrary message deletion
+  - Stream snapshot/restore and administrative backup operations
+  - Native JetStream API subjects, sequence numbers and server-internal identifiers
+  potential_future_extensions:
+  - Client-visible ordered replay controls and replay speed selection
+  - DLQ message detail and explicit redrive operation, if the platform defines a governed redrive workflow
+  - Application-level subscription seek/reset to a permitted timestamp or logical offset
+  - Message tracing and end-to-end processing status query
+x-client-api-design-notes:
+- CORE and JETSTREAM are distinct delivery modes. CORE does not support persistence, durable replay or JetStream
+  acknowledgement semantics.
+- A logical destination is mapped to a NATS subject by the platform. For JetStream, the subject must be covered
+  by an approved stream.
+- The client supplies application identity and logical resource identifiers; the platform enforces ownership and
+  authorization.
+- Do not treat streamName as a create/update instruction. It is a reference to a platform-provisioned stream.
+- The dead-letter endpoints are platform extensions built on configured DLQ policy; DLQ is not a standalone native
+  stream API.
+x-example-policy: 'All request and response examples use representative business values. Schema type declarations
+  such as type: string are data types, not example placeholders.'
